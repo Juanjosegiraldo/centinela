@@ -1,22 +1,22 @@
 # Centinela — Week 1
 
-Infrastructure repository and ingestion API.
+Infrastructure repository and transaction ingestion API.
 
 ## Structure
-- `GUIA_SEMANA1.md` — Complete step-by-step guide with evidence and costs.
-- `infra/provision.sh` — Provisioning (configurable, idempotent).
-- `infra/shutdown.sh` — end-of-day shutdown (`--full` deletes everything).
+- `infra/provision.sh` — Provisioning (parameterized, idempotent).
+- `infra/shutdown.sh` — End-of-day shutdown (`--full` deletes everything).
 - `api/` — Ingestion API (FastAPI, managed identity, credentialless).
+- `docs/` — Written deliverables (quota report, region justification, ADR).
 
 ## Deployment from scratch (Deployment README — Deliverable 26)
-1. Open Azure Cloud Shell (Bash) in an empty subscription.
-2. Clone this repository and edit the parameters at the beginning of `infra/provision.sh`
-   (`UNIQUE_SUFFIX` required: must be globally unique).
+1. Open Azure Cloud Shell (Bash) on an empty subscription.
+2. Clone this repository and edit the parameters at the top of
+   `infra/provision.sh` (`UNIQUE_SUFFIX` is required and must be globally unique).
 3. `bash infra/provision.sh`
-4. `cd api && zip -r ../api.zip . && az webapp deploy -g rg-ctn-dev -n app-ctn-ingesta-dev-<SUFFIX> --src-path ../api.zip --type zip`
-5. Test: `curl https://app-ctn-ingesta-dev-<SUFFIX>.azurewebsites.net/health`
-6. At the end of the day: `bash infra/shutdown.sh`
+4. Deploy the API:
+   `cd api && zip -r ../api.zip . && az webapp deploy -g rg-ctn-dev -n app-ctn-ingest-dev-<SUFFIX> --src-path ../api.zip --type zip`
+5. Test: `curl https://app-ctn-ingest-dev-<SUFFIX>.azurewebsites.net/health`
+6. At the end of each workday: `bash infra/shutdown.sh`
 
-There are no credentials in the code or in the configuration: the API
-authenticates using the platform’s managed identity.
-
+No credentials exist in the code, the configuration, the repository or its
+history: the API authenticates with the platform's managed identity.

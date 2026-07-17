@@ -1,12 +1,12 @@
 """
-PUNTO DE INSERCIÓN — Semana 2 (requisito 2.9, "preparación para la mensajería").
+INSERTION POINT — Week 2 (requirement 2.9, "messaging preparation").
 
-Hoy `publicar_transaccion_recibida` no hace nada. En la Semana 2 su cuerpo
-publicará el evento (p. ej. escribir el mensaje en la cola / Service Bus) SIN
-tocar el endpoint: el flujo del endpoint ya lo invoca tras persistir.
+Today `publish_transaction_received` does nothing. In Week 2 its body will
+publish the event (e.g. write the message to the queue / Service Bus) WITHOUT
+touching the endpoint: the endpoint flow already calls it after persisting.
 """
 
 
-def publicar_transaccion_recibida(transaction_id: str) -> None:
-    # Semana 2: encolar/publicar evento "transaccion_recibida" aquí.
+def publish_transaction_received(transaction_id: str) -> None:
+    # Week 2: enqueue/publish the "transaction_received" event here.
     return None

@@ -1,39 +1,39 @@
 """
-Centinela — API de ingesta (Semana 1).
+Centinela — Ingestion API (Week 1).
 
-Comportamiento requerido, en orden (2.9):
-  1. Recibir  2. Validar contrato  3. Persistir cruda  4. Acuse de recibo.
-NO consulta historial, NO calcula scores, NO aplica reglas, NO abre casos.
+Required behavior, in order (requirement 2.9):
+  1. Receive  2. Validate contract  3. Persist raw  4. Acknowledge.
+It does NOT query history, compute scores, apply rules or open cases.
 
-Tabla de códigos de estado (entregable 18):
-  202  Transacción válida aceptada y persistida (acuse asíncrono).
-  400  JSON malformado / campos ausentes / tipos incorrectos / campos extra /
-       monto fuera de rango / marca de tiempo futura / coordenadas inválidas.
-  409  Documento duplicado (mismo nombre destino ya existe).
-  413  Documento excede el tamaño máximo.
-  415  Tipo de archivo no permitido (validado por contenido real, no extensión).
-  422  (Se normaliza a 400: no exponemos detalles internos de validación
-       más allá del campo y motivo genérico.)
-  500  Error interno; el cuerpo nunca expone trazas ni nombres de recursos.
+Status code table (Deliverable 18):
+  202  Valid transaction accepted and persisted (asynchronous acknowledgment).
+  400  Malformed JSON / missing fields / wrong types / extra fields /
+       amount out of range / future timestamp / invalid coordinates.
+  409  Duplicate document (target name already exists).
+  413  Document exceeds the maximum size.
+  415  File type not allowed (validated by real content, not extension).
+  422  (Normalized to 400: we expose only the field and a generic reason,
+       never internal validation details.)
+  500  Internal error; the body never exposes traces or resource names.
 """
 import json
 import os
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from .contract import Transaccion
+from .contract import Transaction
 from . import storage, events
 
-app = FastAPI(title="Centinela — API de ingesta", version="0.1.0")
+app = FastAPI(title="Centinela — Ingestion API", version="0.1.0")
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "5")) * 1024 * 1024
 
-# Validación por contenido real (magic bytes), no por extensión (2.10)
-FIRMAS = {
+# Validation by real content (magic bytes), never by extension (requirement 2.10)
+SIGNATURES = {
     b"%PDF": ("application/pdf", "pdf"),
     b"\xff\xd8\xff": ("image/jpeg", "jpg"),
     b"\x89PNG\r\n\x1a\n": ("image/png", "png"),
@@ -41,15 +41,15 @@ FIRMAS = {
 
 
 @app.exception_handler(RequestValidationError)
-async def validacion(_req: Request, exc: RequestValidationError):
-    # Mensaje útil para el emisor sin exponer internals del sistema.
-    detalles = [
-        {"campo": ".".join(str(p) for p in e["loc"] if p != "body"),
-         "motivo": e["msg"]}
+async def validation_handler(_req: Request, exc: RequestValidationError):
+    # Useful message for the issuer without exposing system internals.
+    details = [
+        {"field": ".".join(str(p) for p in e["loc"] if p != "body"),
+         "reason": e["msg"]}
         for e in exc.errors()
     ]
     return JSONResponse(status_code=400,
-                        content={"error": "payload_invalido", "detalles": detalles})
+                        content={"error": "invalid_payload", "details": details})
 
 
 @app.get("/health")
@@ -58,39 +58,40 @@ def health():
 
 
 @app.post("/transactions", status_code=202)
-def ingerir(tx: Transaccion):
-    # 3. Persistir la transacción cruda (idempotente por transaction_id)
-    registro = tx.model_dump(mode="json")
-    registro["received_at"] = datetime.now(timezone.utc).isoformat()
-    storage.persistir_transaccion(str(tx.transaction_id), json.dumps(registro))
+def ingest(tx: Transaction):
+    # 3. Persist the raw transaction (idempotent by transaction_id)
+    record = tx.model_dump(mode="json")
+    record["received_at"] = datetime.now(timezone.utc).isoformat()
+    storage.persist_transaction(str(tx.transaction_id), json.dumps(record))
 
-    # Punto de inserción Semana 2 (no-op hoy): publicar evento tras persistir.
-    events.publicar_transaccion_recibida(str(tx.transaction_id))
+    # Week 2 insertion point (no-op today): publish event after persisting.
+    events.publish_transaction_received(str(tx.transaction_id))
 
-    # 4. Acuse de recibo. La confirmación se emite DESPUÉS de persistir:
-    #    es el único punto de la secuencia donde el acuse es seguro (2.12).
+    # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
+    #    the only point in the sequence where it is safe (requirement 2.12).
     return {"status": "accepted", "transaction_id": str(tx.transaction_id)}
 
 
 @app.post("/cases/{case_id}/documents", status_code=201)
-async def cargar_documento(case_id: str, file: UploadFile = File(...)):
+async def upload_document(case_id: str, file: UploadFile = File(...)):
     data = await file.read()
 
     if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, detail={"error": "documento_excede_tamano_maximo"})
+        raise HTTPException(413, detail={"error": "document_exceeds_max_size"})
 
-    tipo = next(((ct, ext) for magia, (ct, ext) in FIRMAS.items()
-                 if data.startswith(magia)), None)
-    if tipo is None:
-        raise HTTPException(415, detail={"error": "tipo_de_archivo_no_permitido"})
-    content_type, ext = tipo
+    detected = next(((ct, ext) for magic, (ct, ext) in SIGNATURES.items()
+                     if data.startswith(magic)), None)
+    if detected is None:
+        raise HTTPException(415, detail={"error": "file_type_not_allowed"})
+    content_type, ext = detected
 
-    # El nombre destino lo genera el SISTEMA (2.10): caso + uuid. El nombre del
-    # archivo del usuario es un vector de ataque conocido y no se utiliza.
-    nombre = f"{case_id}/{uuid.uuid4()}.{ext}"
+    # The target name is generated by the SYSTEM (requirement 2.10):
+    # case id + UUID. The user-provided filename is a known attack vector
+    # and is never used.
+    target_name = f"{case_id}/{uuid.uuid4()}.{ext}"
     try:
-        storage.guardar_documento(nombre, data, content_type)
+        storage.store_document(target_name, data, content_type)
     except Exception:
-        raise HTTPException(409, detail={"error": "conflicto_al_guardar"})
+        raise HTTPException(409, detail={"error": "storage_conflict"})
 
-    return {"status": "stored", "blob": nombre}
+    return {"status": "stored", "blob": target_name}
