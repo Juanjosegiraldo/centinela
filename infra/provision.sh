@@ -13,7 +13,7 @@ set -euo pipefail
 # Every variable value is declared here. Nothing is repeated in the body.
 PROJECT="ctn"                       # project short code (Centinela)
 ENVIRONMENT="dev"                   # dev | qa | prd
-LOCATION="eastus"                   # region justified in docs/region.md
+LOCATION="centralus"                   # region justified in docs/region.md
 UNIQUE_SUFFIX="jj15"                # 3-6 chars: resolves global uniqueness (storage/webapp)
 
 RG="rg-${PROJECT}-${ENVIRONMENT}"
@@ -53,12 +53,19 @@ az network vnet create -g "$RG" -n "$VNET" --address-prefix "$VNET_CIDR" -o none
 az network nsg create -g "$RG" -n "$NSG_APP" -o none
 az network nsg create -g "$RG" -n "$NSG_DATA" -o none
 
-# Rule APP-100: HTTPS outbound from the app toward the data layer.
+# Rule APP-100: HTTPS outbound from the app toward Azure Storage (service tag).
 # Justification: the API persists blobs and queue messages over TLS 443.
-az network nsg rule create -g "$RG" --nsg-name "$NSG_APP" -n Allow-App-To-Data-443 \
+az network nsg rule create -g "$RG" --nsg-name "$NSG_APP" -n Allow-App-To-Storage-443 \
   --priority 100 --direction Outbound --access Allow --protocol Tcp \
   --source-address-prefixes "$SNET_APP_CIDR" --source-port-ranges '*' \
-  --destination-address-prefixes "$SNET_DATA_CIDR" Storage \
+  --destination-address-prefixes Storage \
+  --destination-port-ranges 443 -o none
+
+# Rule APP-110: HTTPS outbound from the app toward the data subnet (Week 2 SQL/Cosmos).
+az network nsg rule create -g "$RG" --nsg-name "$NSG_APP" -n Allow-App-To-Data-443 \
+  --priority 110 --direction Outbound --access Allow --protocol Tcp \
+  --source-address-prefixes "$SNET_APP_CIDR" --source-port-ranges '*' \
+  --destination-address-prefixes "$SNET_DATA_CIDR" \
   --destination-port-ranges 443 -o none
 
 # Rule DATA-100: only the app subnet may reach the data layer (443).
