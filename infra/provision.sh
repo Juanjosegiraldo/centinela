@@ -148,10 +148,33 @@ echo ">> Role assignments"
 STG_ID=$(az storage account show -g "$RG" -n "$STG" --query id -o tsv)
 RG_ID=$(az group show -n "$RG" --query id -o tsv)
 
-# `az role assignment create` is NOT idempotent: it fails if the assignment exists.
-# Documented case; the error is tolerated so the script can be re-run.
-assign() { az role assignment create --assignee-object-id "$1" --assignee-principal-type "$2" \
-           --role "$3" --scope "$4" -o none 2>/dev/null || true; }
+# A freshly created managed identity is not immediately visible to Entra ID,
+# so `az role assignment create` may fail with "PrincipalNotFound" for the
+# first few seconds. It is also NOT idempotent: it fails if the assignment
+# already exists (that case is benign and we treat it as success).
+# Strategy: retry up to 6 times with a growing pause; a genuine failure after
+# all retries stops the script (no more silent `|| true`).
+assign() {
+  local oid="$1" ptype="$2" role="$3" scope="$4" attempt out
+  for attempt in 1 2 3 4 5 6; do
+    if out=$(az role assignment create --assignee-object-id "$oid" \
+               --assignee-principal-type "$ptype" --role "$role" \
+               --scope "$scope" -o none 2>&1); then
+      return 0
+    fi
+    if echo "$out" | grep -qi "already exists\|RoleAssignmentExists"; then
+      return 0
+    fi
+    echo "   role '$role' not ready (attempt $attempt/6), waiting $((attempt*10))s..."
+    sleep $((attempt*10))
+  done
+  echo "ERROR: could not assign role '$role' to $oid after 6 attempts" >&2
+  return 1
+}
+
+# Give the web app's managed identity a head start to propagate in Entra ID
+echo ">> Waiting for the managed identity to propagate..."
+sleep 20
 
 # SERVICE role (web app managed identity) — data plane only:
 #   Blob Data Contributor  -> operation: persist raw transaction; store verification document
