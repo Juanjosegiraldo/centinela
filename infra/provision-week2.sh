@@ -11,6 +11,7 @@ PROJECT="ctn"
 ENVIRONMENT="dev"
 LOCATION="centralus"
 UNIQUE_SUFFIX="jj15"
+FUNC_LOCATION="centralus"   # Function consumption plan region; change if quota unavailable
 
 RG="rg-${PROJECT}-${ENVIRONMENT}"
 VNET="vnet-${PROJECT}-${ENVIRONMENT}"
@@ -41,6 +42,7 @@ SBUS_QUEUE="flagged-cases"               # QUEUE: guarantee processing
 VAULT="kv-${PROJECT}-${ENVIRONMENT}-${UNIQUE_SUFFIX}"
 
 # Scoring engine (Azure Function, consumption plan = pay per execution)
+PLAN="plan-${PROJECT}-${ENVIRONMENT}"
 FUNC="func-${PROJECT}-scoring-${ENVIRONMENT}-${UNIQUE_SUFFIX}"
 
 # Scoring configuration (Deliverable 6: threshold NOT in code)
@@ -109,7 +111,7 @@ az servicebus queue create -g "$RG" --namespace-name "$SBUS" -n "$SBUS_QUEUE" \
 # ----------------------------- SECRETS (Key Vault) ---------------------------
 echo ">> Key Vault: $VAULT"
 az keyvault create -g "$RG" -n "$VAULT" -l "$LOCATION" \
-  --enable-rbac-authorization true -o none
+  --enable-rbac-authorization true -o none 2>/dev/null || echo "   vault already exists, continuing"
 
 MY_OID=$(az ad signed-in-user show --query id -o tsv)
 SUB_ID=$(az account show --query id -o tsv)
@@ -150,9 +152,13 @@ az keyvault secret set --vault-name "$VAULT" -n score-threshold --value "$SCORE_
 
 # ----------------------------- SCORING ENGINE (Function) ---------------------
 echo ">> Function App: $FUNC (consumption plan)"
+# Consumption (dynamic Linux workers) is not available in this subscription in any
+# tested region, so the engine runs on the existing B1 App Service plan. The
+# event trigger is preserved (architectural requirement); scale-to-zero is not,
+# which is acceptable since the B1 plan is already provisioned. See ADR.
 az functionapp create -g "$RG" -n "$FUNC" \
   --storage-account "$STG" \
-  --consumption-plan-location "$LOCATION" \
+  --plan "$PLAN" \
   --runtime python --runtime-version 3.12 --functions-version 4 \
   --os-type Linux -o none
 
