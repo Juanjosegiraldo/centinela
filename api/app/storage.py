@@ -83,6 +83,22 @@ def load_transaction(transaction_id: str) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_account_history(account_id: str) -> list[dict]:
+    if _blobs() is not None:
+        return []
+
+    history = []
+    for path in sorted(_local_storage_dir().glob("*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if payload.get("account_id") == account_id:
+            history.append(payload)
+    history.sort(key=lambda item: item.get("occurred_at", ""))
+    return history
+
+
 def store_document(target_name: str, data: bytes, content_type: str) -> str:
     if _blobs() is not None:
         _blobs().get_blob_client(DOCS_CONTAINER, target_name).upload_blob(
