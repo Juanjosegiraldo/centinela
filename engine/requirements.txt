@@ -1,0 +1,10 @@
+# Azure Functions Python worker (v2 programming model).
+azure-functions
+
+# Managed identity for all data-plane access (no keys, no connection strings).
+azure-identity
+
+# NOTE: azure-servicebus (topic trigger, Block 2), azure-cosmos (history +
+# scored-transaction store, Block 4) and pyodbc (case rows in Azure SQL,
+# Block 5) are added by their respective integration blocks so each PR only
+# ships the dependencies its code actually uses.
