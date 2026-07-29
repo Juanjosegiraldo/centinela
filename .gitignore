@@ -1,0 +1,12 @@
+.venv/
+.venv-1/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+*.sqlite
+*.db
+azurite_data/
+centinela.rar
+tests/jira_issues.json
