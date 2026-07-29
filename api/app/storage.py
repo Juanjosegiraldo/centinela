@@ -7,15 +7,24 @@ import json
 import os
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
+from datetime import datetime, timezone, timedelta
 
 try:
     from azure.identity import DefaultAzureCredential
-    from azure.storage.blob import BlobServiceClient, ContentSettings
+    from azure.storage.blob import (
+        BlobServiceClient,
+        BlobSasPermissions,
+        ContentSettings,
+        generate_blob_sas,
+    )
     from azure.storage.queue import QueueClient
 except ImportError:  # pragma: no cover - local/dev fallback
     DefaultAzureCredential = None
     BlobServiceClient = None
+    BlobSasPermissions = None
     ContentSettings = None
+    generate_blob_sas = None
     QueueClient = None
 
 STORAGE_ACCOUNT_URL = os.environ.get("STORAGE_ACCOUNT_URL")
@@ -51,6 +60,21 @@ def _local_storage_dir() -> Path:
 
 def _local_path(name: str) -> Path:
     return _local_storage_dir() / name
+
+
+def document_blob_name(case_id: str, document_name: str) -> str:
+    if not case_id or not document_name:
+        raise ValueError("case_id and document_name are required")
+    if "/" in document_name or "\\" in document_name:
+        raise ValueError("document_name must be a single path segment")
+    return f"{case_id}/{document_name}"
+
+
+def _storage_account_name() -> str | None:
+    if not STORAGE_ACCOUNT_URL:
+        return None
+    hostname = urlparse(STORAGE_ACCOUNT_URL).hostname or ""
+    return hostname.split(".")[0] if hostname else None
 
 
 def persist_transaction(transaction_id: str, payload_json: str) -> str:
@@ -111,6 +135,54 @@ def store_document(target_name: str, data: bytes, content_type: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return target_name
+
+
+def document_exists(case_id: str, document_name: str) -> bool:
+    blob_name = document_blob_name(case_id, document_name)
+    if _blobs() is not None:
+        return _blobs().get_blob_client(DOCS_CONTAINER, blob_name).exists()
+    return _local_path(blob_name).exists()
+
+
+def issue_document_access_link(case_id: str, document_name: str, minutes: int = 15) -> dict:
+    if minutes < 1 or minutes > 60:
+        raise ValueError("minutes must be between 1 and 60")
+
+    blob_name = document_blob_name(case_id, document_name)
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    if _blobs() is None or generate_blob_sas is None or BlobSasPermissions is None:
+        return {
+            "blob": blob_name,
+            "url": _local_path(blob_name).resolve().as_uri(),
+            "expires_at": expires_at.isoformat(),
+            "mechanism": "local-fallback",
+        }
+
+    account_name = _storage_account_name()
+    if account_name is None:
+        raise RuntimeError("storage account URL is not configured")
+
+    service_client = _blobs()
+    start_at = datetime.now(timezone.utc) - timedelta(minutes=5)
+    delegation_key = service_client.get_user_delegation_key(start_at, expires_at)
+    sas_token = generate_blob_sas(
+        account_name=account_name,
+        container_name=DOCS_CONTAINER,
+        blob_name=blob_name,
+        user_delegation_key=delegation_key,
+        permission=BlobSasPermissions(read=True),
+        start=start_at,
+        expiry=expires_at,
+        protocol="https",
+    )
+    blob_url = service_client.get_blob_client(DOCS_CONTAINER, blob_name).url
+    return {
+        "blob": blob_name,
+        "url": f"{blob_url}?{sas_token}",
+        "expires_at": expires_at.isoformat(),
+        "mechanism": "user-delegation-sas",
+    }
 
 
 @lru_cache(maxsize=1)

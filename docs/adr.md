@@ -113,3 +113,6 @@ subscription in every region tested. Decision: run the Function on the existing
 B1 App Service plan. Consequences: the event trigger is preserved (the
 architectural requirement); scale-to-zero is lost, acceptable since the B1 plan
 is already provisioned and paid for.
+
+### ADR-17 · Private verification documents with user-delegation SAS
+Context: compliance evidence must stay private, but analysts still need temporary access to identity-verification documents. Decision: keep `verification-docs` private, disable Shared Key on the storage account, and use user-delegation SAS links with a short TTL for analyst access. Consequences: anonymous access is denied, account keys cannot be used, and analysts can receive time-bound links without exposing credentials or making the container public.
