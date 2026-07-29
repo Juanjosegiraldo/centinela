@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 from api.app import storage
 import engine.function_app as function_app
@@ -60,6 +61,10 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertEqual(updated["score"], result["score"])
         # 55 >= threshold 50 => a case is opened.
         self.assertTrue(updated["case_enqueued"])
+
+        flagged_cases = Path(self.tempdir.name) / "flagged-cases.jsonl"
+        self.assertTrue(flagged_cases.exists())
+        self.assertIn(transaction_id, flagged_cases.read_text(encoding="utf-8"))
 
     def test_detects_rule_details_and_threshold_configuration(self) -> None:
         previous_id = "22222222-3333-4444-5555-666666666666"

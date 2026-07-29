@@ -14,7 +14,7 @@ set -euo pipefail
 PROJECT="ctn"                       # project short code (Centinela)
 ENVIRONMENT="dev"                   # dev | qa | prd
 LOCATION="centralus"                   # region justified in docs/region.md
-UNIQUE_SUFFIX="jj15"                # 3-6 chars: resolves global uniqueness (storage/webapp)
+UNIQUE_SUFFIX="jj16"                # 3-6 chars: resolves global uniqueness (storage/webapp)
 
 RG="rg-${PROJECT}-${ENVIRONMENT}"
 VNET="vnet-${PROJECT}-${ENVIRONMENT}"
@@ -101,6 +101,7 @@ az storage account create -g "$RG" -n "$STG" -l "$LOCATION" \
   --sku Standard_LRS --kind StorageV2 \
   --min-tls-version TLS1_2 \
   --allow-blob-public-access false \
+  --allow-shared-key-access false \
   --default-action Allow -o none   # locked down at the end, after creating containers/queue
 
 # Containers and queue (Entra login, never account keys)
@@ -219,7 +220,7 @@ assign "$APP_MI" ServicePrincipal "Storage Queue Data Contributor" "$STG_ID"
 echo ">> Isolating the storage account (deny by default + subnet rule)"
 az storage account network-rule add -g "$RG" --account-name "$STG" \
   --vnet-name "$VNET" --subnet "$SNET_APP" -o none || true
-az storage account update -g "$RG" -n "$STG" --default-action Deny --bypass None -o none
+az storage account update -g "$RG" -n "$STG" --default-action Deny --bypass None --allow-shared-key-access false -o none
 
 # ----------------------------- OUTPUT ----------------------------------------
 echo ""
@@ -229,6 +230,7 @@ echo "  Resource group : $RG ($LOCATION)"
 echo "  VNet           : $VNET  app=$SNET_APP_CIDR data=$SNET_DATA_CIDR"
 echo "  Storage        : $STG (access: $SNET_APP only, deny by default)"
 echo "  Containers     : $TX_CONTAINER, $DOCS_CONTAINER | Queue: $INGEST_QUEUE"
+echo "  Shared Key     : disabled; evidence docs require user-delegation SAS"
 echo "  Web App        : https://${WEBAPP}.azurewebsites.net (plan $PLAN_SKU)"
 echo "  Managed identity: $APP_MI"
 echo "  Next step      : deploy the API ->"

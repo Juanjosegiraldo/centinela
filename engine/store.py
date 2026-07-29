@@ -37,8 +37,11 @@ def _container():
 
 
 def _local_storage_dir() -> Path:
-    if LOCAL_STORAGE_ROOT:
-        root = Path(LOCAL_STORAGE_ROOT)
+    # Read the override at call time (not import time) so each test's
+    # CENTINELA_LOCAL_STORAGE is honored and the local fallback stays hermetic.
+    root_env = os.environ.get("CENTINELA_LOCAL_STORAGE")
+    if root_env:
+        root = Path(root_env)
     else:
         root = Path(__file__).resolve().parent.parent / "data"
     root.mkdir(parents=True, exist_ok=True)

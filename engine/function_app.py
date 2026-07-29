@@ -169,7 +169,8 @@ def handle_transaction(payload: dict) -> dict:
 
 
 def process_transaction_event(transaction_id: str) -> dict:
-    """Score a transaction already stored, addressed by id (tests / manual runs)."""
+    """Score a transaction already stored, addressed by id (tests / manual runs
+    and the storage-queue consumer)."""
     payload = store.load_transaction(transaction_id)
     if not payload:
         raise ValueError(f"transaction {transaction_id} not found")
@@ -179,13 +180,13 @@ def process_transaction_event(transaction_id: str) -> dict:
 # ---------------------------------------------------------------------------
 # Azure Functions v2 entry point: Service Bus topic trigger.
 #
-# The API publishes the full transaction record to the `transaction-received`
-# topic; this function consumes the `scoring-engine` subscription. Topic and
-# subscription names come from app settings (%SBUS_TOPIC% / %SBUS_SUBSCRIPTION%).
-# The connection is identity-based (managed identity, no keys): set the app
-# setting ServiceBusConnection__fullyQualifiedNamespace =
-# <namespace>.servicebus.windows.net. The trigger binding is supplied by the
-# extension bundle in host.json, so no azure-servicebus dependency is required.
+# The API publishes to the `transaction-received` topic; this function consumes
+# the `scoring-engine` subscription. Topic and subscription names come from app
+# settings (%SBUS_TOPIC% / %SBUS_SUBSCRIPTION%). The connection is identity-based
+# (managed identity, no keys): set the app setting
+# ServiceBusConnection__fullyQualifiedNamespace = <namespace>.servicebus.windows.net.
+# The trigger binding is supplied by the extension bundle in host.json, so no
+# azure-servicebus dependency is required for the trigger itself.
 # ---------------------------------------------------------------------------
 if func is not None:  # pragma: no cover - exercised by the Functions runtime
     app = func.FunctionApp()
@@ -197,7 +198,10 @@ if func is not None:  # pragma: no cover - exercised by the Functions runtime
         connection="ServiceBusConnection",
     )
     def score_on_transaction_received(message: "func.ServiceBusMessage") -> None:
-        payload = json.loads(message.get_body().decode("utf-8"))
+        event = json.loads(message.get_body().decode("utf-8"))
+        # The API publishes an envelope {event_type, record, published_at, topic}.
+        # Accept both the enveloped form and a bare transaction payload.
+        payload = event.get("record", event) if isinstance(event, dict) else event
         result = handle_transaction(payload)
         logging.info(
             "scored transaction %s: score=%s case=%s",
