@@ -48,6 +48,10 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertEqual(result["transaction_id"], transaction_id)
         # atypical_amount (30) + risky_merchant (25) = 55, weighted 0–100.
         self.assertEqual(result["score"], 55)
+        self.assertEqual(
+            {rule["id"] for rule in result["rules_triggered"]},
+            {"atypical_amount", "risky_merchant"},
+        )
         self.assertIn("rules", result)
         self.assertIn("scored_at", result)
         self.assertIn("case_enqueued", result)

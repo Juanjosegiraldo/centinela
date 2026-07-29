@@ -51,9 +51,14 @@ def _local_path(name: str) -> Path:
 
 def load_transaction(transaction_id: str) -> dict:
     """Fetch a single transaction by id (used by the by-id helper and tests)."""
-    if _container() is not None:
-        # Block 4: point read by id within the /account_id partition.
-        return {}
+    container = _container()
+    if container is not None:
+        items = list(container.query_items(
+            query="SELECT * FROM c WHERE c.id = @id",
+            parameters=[{"name": "@id", "value": transaction_id}],
+            enable_cross_partition_query=True,
+        ))
+        return items[0] if items else {}
     path = _local_path(f"{transaction_id}.json")
     if not path.exists():
         return {}
@@ -62,9 +67,16 @@ def load_transaction(transaction_id: str) -> dict:
 
 def load_account_history(account_id: str) -> list[dict]:
     """Recent transactions of an account, oldest first (velocity/geo rules)."""
-    if _container() is not None:
-        # Block 4: query the /account_id partition for the recent window.
-        return []
+    container = _container()
+    if container is not None:
+        items = container.query_items(
+            query="SELECT * FROM c WHERE c.account_id = @account_id",
+            parameters=[{"name": "@account_id", "value": account_id}],
+            partition_key=account_id,
+        )
+        history = list(items)
+        history.sort(key=lambda item: item.get("occurred_at", ""))
+        return history
     history = []
     for path in sorted(_local_storage_dir().glob("*.json")):
         try:
@@ -79,8 +91,12 @@ def load_account_history(account_id: str) -> list[dict]:
 
 def persist_scored_transaction(transaction_id: str, payload: dict) -> str:
     """Persist the scored transaction (with rules_triggered) for audit/history."""
-    if _container() is not None:
-        # Block 4: upsert the scored record into Cosmos.
+    container = _container()
+    if container is not None:
+        # `id` addresses the item; `account_id` is the partition key. TTL is
+        # enforced by the container (90 days), not written per item.
+        document = {**payload, "id": transaction_id}
+        container.upsert_item(body=document)
         return transaction_id
     _local_path(f"{transaction_id}.json").write_text(
         json.dumps(payload), encoding="utf-8"

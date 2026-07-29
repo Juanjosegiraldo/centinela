@@ -146,6 +146,7 @@ def score_transaction(payload: dict, history: list[dict]) -> dict:
         "scored": True,
         "score": score,
         "rules": rules,
+        "rules_triggered": triggered,
         "scored_at": datetime.now(timezone.utc).isoformat(),
         "case_enqueued": score >= threshold,
     }

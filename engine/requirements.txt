@@ -4,7 +4,9 @@ azure-functions
 # Managed identity for all data-plane access (no keys, no connection strings).
 azure-identity
 
-# NOTE: azure-servicebus (topic trigger, Block 2), azure-cosmos (history +
-# scored-transaction store, Block 4) and pyodbc (case rows in Azure SQL,
-# Block 5) are added by their respective integration blocks so each PR only
-# ships the dependencies its code actually uses.
+# Cosmos DB: read account history and persist scored transactions (Block 4).
+azure-cosmos
+
+# NOTE: the Service Bus topic trigger needs no SDK (its binding ships in the
+# host.json extension bundle). pyodbc (case rows in Azure SQL) and, if the
+# engine publishes flagged cases itself, azure-servicebus arrive with Block 5.
