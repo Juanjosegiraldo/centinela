@@ -7,6 +7,13 @@ azure-identity
 # Cosmos DB: read account history and persist scored transactions (Block 4).
 azure-cosmos
 
-# NOTE: the Service Bus topic trigger needs no SDK (its binding ships in the
-# host.json extension bundle). pyodbc (case rows in Azure SQL) and, if the
-# engine publishes flagged cases itself, azure-servicebus arrive with Block 5.
+# Case store + flagged-cases publishing (Block 5): read the SQL connection
+# string from Key Vault, write case rows via ODBC, and enqueue flagged cases.
+# The Service Bus topic TRIGGER needs no SDK (binding ships in the host.json
+# extension bundle); azure-servicebus here is for PUBLISHING to flagged-cases.
+azure-keyvault-secrets
+pyodbc
+azure-servicebus
+
+# Deploy prerequisite: the Function's Linux worker needs the Microsoft ODBC
+# driver (msodbcsql18) available for pyodbc to reach Azure SQL.

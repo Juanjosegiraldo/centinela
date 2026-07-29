@@ -5,9 +5,10 @@ import os
 from datetime import datetime, timezone
 
 try:  # package context (local runs and unit tests)
-    from . import store
+    from . import store, cases
 except ImportError:  # top-level context (Azure Functions host loads function_app.py)
     import store
+    import cases
 
 try:
     import azure.functions as func
@@ -162,8 +163,8 @@ def handle_transaction(payload: dict) -> dict:
     scored_record = {**payload, **result}
     store.persist_scored_transaction(result["transaction_id"], scored_record)
 
-    # Block 5 seam: when result["case_enqueued"] is True, open a case row in
-    # Azure SQL (casesdb) and enqueue it on the flagged-cases queue.
+    if result["case_enqueued"]:
+        cases.open_case(result, payload)
     return result
 
 
