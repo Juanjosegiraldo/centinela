@@ -1,12 +1,37 @@
 import json
 import math
 import os
+from functools import lru_cache
 from datetime import datetime, timezone
 
 from api.app import storage
 
+try:
+    from azure.identity import DefaultAzureCredential
+    from azure.servicebus import ServiceBusClient, ServiceBusMessage
+except ImportError:  # pragma: no cover - local/dev fallback
+    DefaultAzureCredential = None
+    ServiceBusClient = None
+    ServiceBusMessage = None
+
 
 DEFAULT_THRESHOLD = 3
+SERVICEBUS_FQDN = os.environ.get("SERVICEBUS_FQDN")
+SBUS_QUEUE = os.environ.get("SBUS_QUEUE", "flagged-cases")
+
+
+@lru_cache(maxsize=1)
+def _credential():
+    if DefaultAzureCredential is None:
+        return None
+    return DefaultAzureCredential()
+
+
+@lru_cache(maxsize=1)
+def _servicebus_client():
+    if ServiceBusClient is None or SERVICEBUS_FQDN is None:
+        return None
+    return ServiceBusClient(fully_qualified_namespace=SERVICEBUS_FQDN, credential=_credential())
 
 
 def _load_transaction_payload(transaction_id: str) -> dict:
@@ -144,4 +169,20 @@ def process_transaction_event(transaction_id: str) -> dict:
 
     payload.update(result)
     storage.persist_transaction(transaction_id, json.dumps(payload))
+
+    if case_enqueued:
+        _enqueue_flagged_case(result)
+
     return result
+
+
+def _enqueue_flagged_case(result: dict) -> None:
+    if _servicebus_client() is not None and ServiceBusMessage is not None:
+        message = ServiceBusMessage(json.dumps(result), content_type="application/json")
+        with _servicebus_client().get_queue_sender(queue_name=SBUS_QUEUE) as sender:
+            sender.send_messages(message)
+        return
+
+    path = storage._local_path("flagged-cases.jsonl")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(result) + "\n")

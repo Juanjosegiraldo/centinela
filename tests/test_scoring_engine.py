@@ -53,6 +53,10 @@ class ScoringEngineTests(unittest.TestCase):
         self.assertEqual(updated["score"], result["score"])
         self.assertTrue(updated["case_enqueued"])
 
+        flagged_cases = storage._local_path("flagged-cases.jsonl")
+        self.assertTrue(flagged_cases.exists())
+        self.assertIn(transaction_id, flagged_cases.read_text(encoding="utf-8"))
+
     def test_detects_rule_details_and_threshold_configuration(self) -> None:
         previous_id = "22222222-3333-4444-5555-666666666666"
         previous_payload = {

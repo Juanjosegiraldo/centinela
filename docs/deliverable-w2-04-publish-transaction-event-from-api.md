@@ -14,7 +14,7 @@ Make the ingestion API publish an event after the transaction is durably stored 
 
 ## Implementation notes
 - The ingestion flow in [api/app/main.py](api/app/main.py) already persists the raw transaction first, then calls `events.publish_transaction_received(...)`, and only then returns 202.
-- The event publisher in [api/app/events.py](api/app/events.py) now targets the Service Bus topic configured by `SERVICEBUS_FQDN` and `SBUS_TOPIC`.
+- The event publisher in [api/app/events.py](api/app/events.py) now targets the Service Bus topic configured by `SERVICEBUS_FQDN` and `SBUS_TOPIC`, and sends the full transaction record as JSON.
 - In local development, the same publisher writes to a local topic log so the flow remains testable without Azure.
 - The engine is still decoupled: the API only publishes the event; it does not score the transaction itself.
 

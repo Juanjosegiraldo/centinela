@@ -54,4 +54,5 @@ class IngestPublishingTests(unittest.TestCase):
         event_log = storage._local_path("topic-messages.jsonl")
         self.assertTrue(event_log.exists())
         event = json.loads(event_log.read_text(encoding="utf-8").strip())
-        self.assertEqual(event["transaction_id"], str(tx.transaction_id))
+        self.assertEqual(event["record"]["transaction_id"], str(tx.transaction_id))
+        self.assertEqual(event["record"]["received_at"], stored["received_at"])
