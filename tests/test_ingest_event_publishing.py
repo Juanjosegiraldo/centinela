@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - local runtime without project deps
 @unittest.skipIf(ingest is None, "project runtime dependencies are not installed")
 class IngestPublishingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-ingest-", dir="/tmp")
+        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-ingest-")
         os.environ["CENTINELA_LOCAL_STORAGE"] = self.tempdir.name
         os.environ.pop("SERVICEBUS_FQDN", None)
         os.environ.pop("SBUS_TOPIC", None)

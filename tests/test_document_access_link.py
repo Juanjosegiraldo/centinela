@@ -11,7 +11,7 @@ from api.app import storage
 
 class DocumentAccessLinkTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-docs-", dir="/tmp")
+        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-docs-")
         os.environ["CENTINELA_LOCAL_STORAGE"] = self.tempdir.name
         os.environ.pop("STORAGE_ACCOUNT_URL", None)
 

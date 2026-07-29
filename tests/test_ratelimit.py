@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover - project runtime deps not installed her
                  "project runtime dependencies are not installed")
 class RateLimitTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-rate-", dir="/tmp")
+        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-rate-")
         os.environ["CENTINELA_LOCAL_STORAGE"] = self.tempdir.name
         os.environ["RATE_LIMIT_PER_MINUTE"] = "2"
         os.environ["RATE_LIMIT_WINDOW_SECONDS"] = "60"

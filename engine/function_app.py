@@ -1,41 +1,32 @@
 import json
+import logging
 import math
 import os
-from functools import lru_cache
 from datetime import datetime, timezone
 
-from api.app import storage
+try:  # package context (local runs and unit tests)
+    from . import store, cases
+except ImportError:  # top-level context (Azure Functions host loads function_app.py)
+    import store
+    import cases
 
 try:
-    from azure.identity import DefaultAzureCredential
-    from azure.servicebus import ServiceBusClient, ServiceBusMessage
-except ImportError:  # pragma: no cover - local/dev fallback
-    DefaultAzureCredential = None
-    ServiceBusClient = None
-    ServiceBusMessage = None
+    import azure.functions as func
+except ImportError:  # pragma: no cover - Functions runtime absent in local/dev
+    func = None
 
 
-DEFAULT_THRESHOLD = 3
-SERVICEBUS_FQDN = os.environ.get("SERVICEBUS_FQDN")
-SBUS_QUEUE = os.environ.get("SBUS_QUEUE", "flagged-cases")
+DEFAULT_THRESHOLD = 50
 
-
-@lru_cache(maxsize=1)
-def _credential():
-    if DefaultAzureCredential is None:
-        return None
-    return DefaultAzureCredential()
-
-
-@lru_cache(maxsize=1)
-def _servicebus_client():
-    if ServiceBusClient is None or SERVICEBUS_FQDN is None:
-        return None
-    return ServiceBusClient(fully_qualified_namespace=SERVICEBUS_FQDN, credential=_credential())
-
-
-def _load_transaction_payload(transaction_id: str) -> dict:
-    return storage.load_transaction(transaction_id)
+# Weighted 0–100 fraud score: each rule contributes its weight when triggered.
+# A case opens when the summed score reaches the threshold (default 50, sourced
+# from Key Vault via the SCORING_THRESHOLD app setting — never hardcoded).
+RULE_WEIGHTS = {
+    "geo_impossible": 60,
+    "velocity": 40,
+    "atypical_amount": 30,
+    "risky_merchant": 25,
+}
 
 
 def _threshold() -> int:
@@ -65,16 +56,14 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return radius_km * c
 
 
-def _score_rules(payload: dict) -> list[dict]:
+def _score_rules(payload: dict, history: list[dict]) -> list[dict]:
     rules: list[dict] = []
-    account_id = payload.get("account_id")
     amount_minor = int(payload.get("amount_minor", 0))
     occurred_at = payload.get("occurred_at")
     location = payload.get("location") or {}
     merchant_id = str(payload.get("merchant_id", "")).lower()
     merchant_category = str(payload.get("merchant_category", "")).lower()
 
-    history = storage.load_account_history(account_id) if account_id else []
     occurred_dt = _parse_datetime(occurred_at)
     now = datetime.now(timezone.utc)
 
@@ -146,43 +135,75 @@ def _score_rules(payload: dict) -> list[dict]:
     return rules
 
 
-def process_transaction_event(transaction_id: str) -> dict:
-    payload = _load_transaction_payload(transaction_id)
-    if not payload:
-        raise ValueError(f"transaction {transaction_id} not found")
-
-    rules = _score_rules(payload)
+def score_transaction(payload: dict, history: list[dict]) -> dict:
+    """Pure scoring, no I/O. Given a transaction and its account history,
+    return the weighted score, the rule breakdown and the case decision."""
+    rules = _score_rules(payload, history)
     triggered = [rule for rule in rules if rule.get("triggered")]
-    score = len(triggered)
-    scored_at = datetime.now(timezone.utc).isoformat()
-
+    score = sum(RULE_WEIGHTS.get(rule["id"], 0) for rule in triggered)
     threshold = _threshold()
-    case_enqueued = score > threshold
-    result = {
-        "transaction_id": transaction_id,
+    return {
+        "transaction_id": str(payload.get("transaction_id", "")),
         "scored": True,
         "score": score,
         "rules": rules,
-        "scored_at": scored_at,
-        "case_enqueued": case_enqueued,
+        "rules_triggered": triggered,
+        "scored_at": datetime.now(timezone.utc).isoformat(),
+        "case_enqueued": score >= threshold,
     }
 
-    payload.update(result)
-    storage.persist_transaction(transaction_id, json.dumps(payload))
 
-    if case_enqueued:
-        _enqueue_flagged_case(result)
+def handle_transaction(payload: dict) -> dict:
+    """Score a transaction and persist the scored record. Single entry point
+    shared by the Service Bus trigger and the by-id helper below."""
+    account_id = payload.get("account_id")
+    history = store.load_account_history(account_id) if account_id else []
+    result = score_transaction(payload, history)
 
+    scored_record = {**payload, **result}
+    store.persist_scored_transaction(result["transaction_id"], scored_record)
+
+    if result["case_enqueued"]:
+        cases.open_case(result, payload)
     return result
 
 
-def _enqueue_flagged_case(result: dict) -> None:
-    if _servicebus_client() is not None and ServiceBusMessage is not None:
-        message = ServiceBusMessage(json.dumps(result), content_type="application/json")
-        with _servicebus_client().get_queue_sender(queue_name=SBUS_QUEUE) as sender:
-            sender.send_messages(message)
-        return
+def process_transaction_event(transaction_id: str) -> dict:
+    """Score a transaction already stored, addressed by id (tests / manual runs
+    and the storage-queue consumer)."""
+    payload = store.load_transaction(transaction_id)
+    if not payload:
+        raise ValueError(f"transaction {transaction_id} not found")
+    return handle_transaction(payload)
 
-    path = storage._local_path("flagged-cases.jsonl")
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(result) + "\n")
+
+# ---------------------------------------------------------------------------
+# Azure Functions v2 entry point: Service Bus topic trigger.
+#
+# The API publishes to the `transaction-received` topic; this function consumes
+# the `scoring-engine` subscription. Topic and subscription names come from app
+# settings (%SBUS_TOPIC% / %SBUS_SUBSCRIPTION%). The connection is identity-based
+# (managed identity, no keys): set the app setting
+# ServiceBusConnection__fullyQualifiedNamespace = <namespace>.servicebus.windows.net.
+# The trigger binding is supplied by the extension bundle in host.json, so no
+# azure-servicebus dependency is required for the trigger itself.
+# ---------------------------------------------------------------------------
+if func is not None:  # pragma: no cover - exercised by the Functions runtime
+    app = func.FunctionApp()
+
+    @app.service_bus_topic_trigger(
+        arg_name="message",
+        topic_name="%SBUS_TOPIC%",
+        subscription_name="%SBUS_SUBSCRIPTION%",
+        connection="ServiceBusConnection",
+    )
+    def score_on_transaction_received(message: "func.ServiceBusMessage") -> None:
+        event = json.loads(message.get_body().decode("utf-8"))
+        # The API publishes an envelope {event_type, record, published_at, topic}.
+        # Accept both the enveloped form and a bare transaction payload.
+        payload = event.get("record", event) if isinstance(event, dict) else event
+        result = handle_transaction(payload)
+        logging.info(
+            "scored transaction %s: score=%s case=%s",
+            result["transaction_id"], result["score"], result["case_enqueued"],
+        )

@@ -11,7 +11,7 @@ from engine import queue_consumer
 
 class QueueProcessingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-queue-", dir="/tmp")
+        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-queue-")
         os.environ["CENTINELA_LOCAL_STORAGE"] = self.tempdir.name
         os.environ.pop("STORAGE_ACCOUNT_URL", None)
         os.environ.pop("QUEUE_ACCOUNT_URL", None)

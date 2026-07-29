@@ -10,7 +10,7 @@ from api.app import events, storage
 
 class EventPublishingTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-events-", dir="/tmp")
+        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-events-")
         os.environ["CENTINELA_LOCAL_STORAGE"] = self.tempdir.name
         os.environ.pop("SERVICEBUS_FQDN", None)
         os.environ.pop("SBUS_TOPIC", None)
