@@ -6,7 +6,17 @@ from datetime import datetime, timezone
 from api.app import storage
 
 
-DEFAULT_THRESHOLD = 3
+DEFAULT_THRESHOLD = 50
+
+# Weighted 0–100 fraud score: each rule contributes its weight when triggered.
+# A case opens when the summed score reaches the threshold (default 50, sourced
+# from Key Vault via the SCORING_THRESHOLD app setting — never hardcoded).
+RULE_WEIGHTS = {
+    "geo_impossible": 60,
+    "velocity": 40,
+    "atypical_amount": 30,
+    "risky_merchant": 25,
+}
 
 
 def _load_transaction_payload(transaction_id: str) -> dict:
@@ -128,11 +138,11 @@ def process_transaction_event(transaction_id: str) -> dict:
 
     rules = _score_rules(payload)
     triggered = [rule for rule in rules if rule.get("triggered")]
-    score = len(triggered)
+    score = sum(RULE_WEIGHTS.get(rule["id"], 0) for rule in triggered)
     scored_at = datetime.now(timezone.utc).isoformat()
 
     threshold = _threshold()
-    case_enqueued = score > threshold
+    case_enqueued = score >= threshold
     result = {
         "transaction_id": transaction_id,
         "scored": True,

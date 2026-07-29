@@ -12,10 +12,11 @@ process_transaction_event = function_app.process_transaction_event
 
 class ScoringEngineTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-test-", dir="/tmp")
+        self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-test-")
         os.environ["CENTINELA_LOCAL_STORAGE"] = self.tempdir.name
         os.environ.pop("STORAGE_ACCOUNT_URL", None)
         os.environ.pop("QUEUE_ACCOUNT_URL", None)
+        os.environ.pop("SCORING_THRESHOLD", None)
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -40,17 +41,20 @@ class ScoringEngineTests(unittest.TestCase):
         storage.persist_transaction(transaction_id, json.dumps(payload))
         storage.enqueue_transaction(transaction_id)
 
+        os.environ["SCORING_THRESHOLD"] = "50"
         result = process_transaction_event(transaction_id)
 
         self.assertTrue(result["scored"])
         self.assertEqual(result["transaction_id"], transaction_id)
-        self.assertGreaterEqual(result["score"], 1)
+        # atypical_amount (30) + risky_merchant (25) = 55, weighted 0–100.
+        self.assertEqual(result["score"], 55)
         self.assertIn("rules", result)
         self.assertIn("scored_at", result)
         self.assertIn("case_enqueued", result)
 
         updated = storage.load_transaction(transaction_id)
         self.assertEqual(updated["score"], result["score"])
+        # 55 >= threshold 50 => a case is opened.
         self.assertTrue(updated["case_enqueued"])
 
     def test_detects_rule_details_and_threshold_configuration(self) -> None:
@@ -82,7 +86,10 @@ class ScoringEngineTests(unittest.TestCase):
         }
         storage.persist_transaction(transaction_id, json.dumps(payload))
 
-        os.environ["SCORING_THRESHOLD"] = "5"
+        # Weighted score here = geo_impossible(60) + atypical_amount(30)
+        # + risky_merchant(25) + velocity(40) = 155. A threshold above it
+        # keeps the case closed; the threshold is configuration, not code.
+        os.environ["SCORING_THRESHOLD"] = "200"
         result = process_transaction_event(transaction_id)
 
         triggered_ids = {rule["id"] for rule in result["rules"] if rule["triggered"]}
@@ -95,7 +102,7 @@ class ScoringEngineTests(unittest.TestCase):
             if rule["triggered"]:
                 self.assertIn("observed", rule)
 
-        os.environ["SCORING_THRESHOLD"] = "0"
+        os.environ["SCORING_THRESHOLD"] = "50"
         result = process_transaction_event(transaction_id)
         self.assertTrue(result["case_enqueued"])
 
