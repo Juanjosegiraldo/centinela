@@ -66,6 +66,14 @@ def ingest(tx: Transaction):
         record["received_at"] = datetime.now(timezone.utc).isoformat()
         storage.persist_transaction(str(tx.transaction_id), json.dumps(record))
 
+        trace = {
+            "transaction_id": str(tx.transaction_id),
+            "received_at": record["received_at"],
+            "source": "api",
+            "status": "accepted"
+        }
+        storage.persist_trace(str(tx.transaction_id), json.dumps(trace))
+
         # Week 2 insertion point (no-op today): publish event after persisting.
         events.publish_transaction_received(str(tx.transaction_id))
 

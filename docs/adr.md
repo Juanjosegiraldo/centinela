@@ -39,3 +39,8 @@
 - **Context:** Week 1 should not incur unnecessary spend overnight.
 - **Decision:** Use `infra/shutdown.sh` to stop/delete compute resources daily; keep storage and VNet intact.
 - **Consequences:** Cost is minimized while preserving the environment for fast rebuild.
+
+## ADR 9: Traceability and closure evidence
+- **Context:** Closure validation requires explicit evidence that the API accepted the transaction and the system logged a persistence trace.
+- **Decision:** Persist a trace document in the verification container for each accepted transaction, alongside the raw transaction blob.
+- **Consequences:** Proof-of-closure is available in storage for QA and audit; distributed trace data is available before Week 2 messaging is enabled.

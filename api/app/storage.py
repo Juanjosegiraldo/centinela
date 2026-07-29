@@ -70,6 +70,17 @@ def store_document(target_name: str, data: bytes, content_type: str) -> str:
     return target_name
 
 
+def persist_trace(transaction_id: str, payload_json: str) -> str:
+    blobs = _blobs()
+    _ensure_container(blobs, DOCS_CONTAINER)
+    trace_name = f"trace/{transaction_id}.json"
+    blobs.get_blob_client(DOCS_CONTAINER, trace_name).upload_blob(
+        payload_json, overwrite=True,
+        content_settings=ContentSettings(content_type="application/json"),
+    )
+    return trace_name
+
+
 @lru_cache(maxsize=1)
 def queue() -> QueueClient:
     conn = os.environ.get("AZURE_QUEUE_CONNECTION_STRING", "")
