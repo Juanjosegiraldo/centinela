@@ -1,6 +1,15 @@
+﻿.venv/
+.venv-1/
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
 *.pyd
+*.log
+*.sqlite
+*.db
+azurite_data/
+centinela.rar
+tests/jira_issues.json
+*.py[cod]
 .pytest_cache/
 data/

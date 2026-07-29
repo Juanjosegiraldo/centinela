@@ -1,4 +1,4 @@
-"""Event publishing for the ingestion flow."""
+﻿"""Event publishing for the ingestion flow."""
 
 import json
 import os

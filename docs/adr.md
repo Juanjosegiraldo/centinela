@@ -1,4 +1,4 @@
-# Architecture Decision Record — Centinela
+﻿# Architecture Decision Record — Centinela
 
 Format: context -> decision -> consequences. One entry per significant decision.
 
@@ -6,9 +6,9 @@ Format: context -> decision -> consequences. One entry per significant decision.
 
 ### ADR-01 · Subscription type
 Context: Azure for Students was not available (Universidad de Medellín is not
-registered in the program; the institution never appears in Microsoft's
+registered in the program; the institution never appears in Microsoft’s
 eligibility list). Decision: use the standard free trial (200 USD, 30 days,
-spending limit on). Consequences: matches the "limited credit, 30-day validity"
+spending limit on). Consequences: matches the “limited credit, 30-day validity”
 subscription the brief describes; the 21-day project fits within the window.
 
 ### ADR-02 · Region: centralus
@@ -26,7 +26,7 @@ Decision: B1, the lowest tier that supports VNet integration. Consequences:
 ### ADR-04 · Storage redundancy LRS
 Context: evidence preservation for a 21-day project. Decision: LRS, the cheapest
 redundancy. Consequences: three copies in one datacenter; production would use
-ZRS/GRS. Documented as a cost decision.
+ZRS/GRS.
 
 ### ADR-05 · Service endpoints over private endpoints
 Context: the storage account must be unreachable from the internet. Decision:
@@ -38,12 +38,12 @@ IP inside the VNet; not justified for this budget.
 ### ADR-06 · Resource providers must be registered
 Context: a fresh subscription starts with resource providers unregistered; even
 quota queries failed until registering them. Decision: register providers as a
-prerequisite step. Consequences: reinforces the "credit is not capacity"
+prerequisite step. Consequences: reinforces the “credit is not capacity”
 principle; each new service type needs its provider registered.
 
 ### ADR-07 · Role assignment is not idempotent
 Context: assigning a role to a just-created managed identity fails because the
-identity has not propagated in Entra ID; the original script silenced the error
+dentity has not propagated in Entra ID; the original script silenced the error
 and left the app unable to write. Decision: retry with backoff and stop on a
 genuine failure instead of silencing it. Consequences: the script is now
 reproducible from scratch; the managed identity gets its roles without manual
@@ -52,11 +52,11 @@ intervention.
 ## Week 2
 
 ### ADR-08 · Transaction store partition key /account_id
-Context: the dominant query is "recent transactions of one account", run by the
+Context: the dominant query is “recent transactions of one account”, run by the
 scoring engine on every transaction. Decision: partition by /account_id.
 Consequences: that query reads a single partition (cheap, scalable). Sacrifices
 cross-account queries, which the system does not need. Alternatives discarded:
-/transaction_id (scatters an account's history across all partitions, forcing
+/transaction_id (scatters an account’s history across all partitions, forcing
 cross-partition reads) and /merchant_id (optimises by merchant, not by account).
 The partition key cannot be changed without full data migration, so it was fixed
 before the first write.
@@ -104,8 +104,9 @@ latency, acceptable for this access pattern.
 
 ### ADR-15 · Key Vault create is not idempotent
 Context: `az keyvault create` fails if the vault already exists, stopping the
-re-run of the provisioning script. Decision: tolerate the "already exists" error
-and continue. Consequences: the week 2 script can be re-run like the week 1 one.
+re-run of the provisioning script. Decision: tolerate the “already exists” error
+and continue. Consequences: the week 2 script can be re-run like the week 1
+one.
 
 ### ADR-16 · Scoring engine on the B1 plan
 Context: the Linux consumption plan (dynamic workers) is unavailable in this
@@ -115,4 +116,17 @@ architectural requirement); scale-to-zero is lost, acceptable since the B1 plan
 is already provisioned and paid for.
 
 ### ADR-17 · Private verification documents with user-delegation SAS
-Context: compliance evidence must stay private, but analysts still need temporary access to identity-verification documents. Decision: keep `verification-docs` private, disable Shared Key on the storage account, and use user-delegation SAS links with a short TTL for analyst access. Consequences: anonymous access is denied, account keys cannot be used, and analysts can receive time-bound links without exposing credentials or making the container public.
+Context: compliance evidence must stay private, but analysts still need temporary
+access to identity-verification documents. Decision: keep `verification-docs`
+private, disable Shared Key on the storage account, and use user-delegation SAS
+links with a short TTL for analyst access. Consequences: anonymous access is
+denied, account keys cannot be used, and analysts can receive time-bound links
+without exposing credentials or making the container public.
+
+### ADR-18 · Traceability and closure evidence
+Context: closure validation requires explicit evidence that the API accepted the
+transaction and the system logged a persistence trace.
+Decision: persist a trace document in the verification container for each
+accepted transaction, alongside the raw transaction blob.
+Consequences: proof-of-closure is available in storage for QA and audit;
+distributed trace data is available before Week 2 messaging is enabled.

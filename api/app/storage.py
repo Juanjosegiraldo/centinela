@@ -1,4 +1,4 @@
-"""
+﻿"""
 Persistence layer (repository). The only module that talks to Azure Storage.
 Authentication: DefaultAzureCredential -> the Web App's managed identity.
 No keys or connection strings exist in code or configuration.
@@ -37,6 +37,13 @@ LOCAL_STORAGE_ROOT = os.environ.get("CENTINELA_LOCAL_STORAGE")
 POISON_THRESHOLD = int(os.environ.get("POISON_THRESHOLD", "5"))
 
 
+def _ensure_container(client, container_name: str) -> None:
+    try:
+        client.create_container(container_name)
+    except Exception:
+        pass
+
+
 @lru_cache(maxsize=1)
 def _credential():
     if DefaultAzureCredential is None:
@@ -44,16 +51,33 @@ def _credential():
     return DefaultAzureCredential()
 
 
+def _local_emulator() -> bool:
+    conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "") or os.environ.get("AZURE_QUEUE_CONNECTION_STRING", "")
+    return "UseDevelopmentStorage=true" in conn.lower()
+
+
 @lru_cache(maxsize=1)
 def _blobs():
-    if BlobServiceClient is None or STORAGE_ACCOUNT_URL is None:
+    if BlobServiceClient is None:
         return None
-    return BlobServiceClient(account_url=STORAGE_ACCOUNT_URL, credential=_credential())
+
+    conn = os.environ.get("AZURE_STORAGE_CONNECTION_STRING", "")
+    account_url = os.environ.get("STORAGE_ACCOUNT_URL", "") or "http://127.0.0.1:10000/devstoreaccount1"
+    kwargs = {}
+
+    if _local_emulator() or account_url.startswith(("http://127.0.0.1", "http://localhost")):
+        kwargs["api_version"] = "2023-11-03"
+
+    if conn:
+        return BlobServiceClient.from_connection_string(conn, **kwargs)
+
+    if account_url:
+        return BlobServiceClient(account_url=account_url, credential=_credential(), **kwargs)
+
+    raise RuntimeError("STORAGE_ACCOUNT_URL is not set")
 
 
 def _local_storage_dir() -> Path:
-    # Read the override at call time (not import time) so each test's
-    # CENTINELA_LOCAL_STORAGE is honored and the local fallback stays hermetic.
     root_env = os.environ.get("CENTINELA_LOCAL_STORAGE")
     if root_env:
         root = Path(root_env)
@@ -84,16 +108,19 @@ def _storage_account_name() -> str | None:
 
 def persist_transaction(transaction_id: str, payload_json: str) -> str:
     """Persist the raw transaction. Name = id => idempotent retries."""
+    blob_name = f"{transaction_id}.json"
     if _blobs() is not None:
-        blob_name = f"{transaction_id}.json"
-        _blobs().get_blob_client(TX_CONTAINER, blob_name).upload_blob(
+        blobs = _blobs()
+        _ensure_container(blobs, TX_CONTAINER)
+        blobs.get_blob_client(TX_CONTAINER, blob_name).upload_blob(
             payload_json, overwrite=True,
             content_settings=ContentSettings(content_type="application/json"),
         )
         return blob_name
 
-    blob_name = f"{transaction_id}.json"
-    _local_path(blob_name).write_text(payload_json, encoding="utf-8")
+    path = _local_path(blob_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload_json, encoding="utf-8")
     return blob_name
 
 
@@ -140,6 +167,23 @@ def store_document(target_name: str, data: bytes, content_type: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return target_name
+
+
+def persist_trace(transaction_id: str, payload_json: str) -> str:
+    trace_name = f"trace/{transaction_id}.json"
+    if _blobs() is not None:
+        blobs = _blobs()
+        _ensure_container(blobs, DOCS_CONTAINER)
+        blobs.get_blob_client(DOCS_CONTAINER, trace_name).upload_blob(
+            payload_json, overwrite=True,
+            content_settings=ContentSettings(content_type="application/json"),
+        )
+        return trace_name
+
+    path = _local_path(trace_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload_json, encoding="utf-8")
+    return trace_name
 
 
 def document_exists(case_id: str, document_name: str) -> bool:
@@ -192,10 +236,26 @@ def issue_document_access_link(case_id: str, document_name: str, minutes: int = 
 
 @lru_cache(maxsize=1)
 def queue():
-    if QueueClient is None or QUEUE_ACCOUNT_URL is None:
+    if QueueClient is None:
         return None
-    return QueueClient(account_url=QUEUE_ACCOUNT_URL, queue_name=QUEUE_NAME,
-                       credential=_credential())
+
+    conn = os.environ.get("AZURE_QUEUE_CONNECTION_STRING", "")
+    account_url = os.environ.get("QUEUE_ACCOUNT_URL", "") or "http://127.0.0.1:10001/devstoreaccount1"
+    kwargs = {}
+
+    if _local_emulator() or account_url.startswith(("http://127.0.0.1", "http://localhost")):
+        kwargs["api_version"] = "2023-11-03"
+
+    if conn:
+        q = QueueClient.from_connection_string(conn_str=conn, queue_name=QUEUE_NAME, **kwargs)
+    else:
+        q = QueueClient(account_url=account_url, queue_name=QUEUE_NAME,
+                        credential=_credential(), **kwargs)
+    try:
+        q.create_queue()
+    except Exception:
+        pass
+    return q
 
 
 def enqueue_transaction(transaction_id: str) -> str:
@@ -210,10 +270,20 @@ def enqueue_transaction(transaction_id: str) -> str:
 
 
 def _poison_queue():
-    if QueueClient is None or QUEUE_ACCOUNT_URL is None:
+    if QueueClient is None:
         return None
-    return QueueClient(account_url=QUEUE_ACCOUNT_URL, queue_name=POISON_QUEUE_NAME,
-                       credential=_credential())
+
+    conn = os.environ.get("AZURE_QUEUE_CONNECTION_STRING", "")
+    account_url = os.environ.get("QUEUE_ACCOUNT_URL", "") or "http://127.0.0.1:10001/devstoreaccount1"
+    kwargs = {}
+
+    if _local_emulator() or account_url.startswith(("http://127.0.0.1", "http://localhost")):
+        kwargs["api_version"] = "2023-11-03"
+
+    if conn:
+        return QueueClient.from_connection_string(conn_str=conn, queue_name=POISON_QUEUE_NAME, **kwargs)
+    return QueueClient(account_url=account_url, queue_name=POISON_QUEUE_NAME,
+                       credential=_credential(), **kwargs)
 
 
 def receive_next_transaction() -> dict | None:

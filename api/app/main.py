@@ -1,4 +1,4 @@
-"""
+﻿"""
 Centinela — Ingestion API (Week 1).
 
 Required behavior, in order (requirement 2.9):
@@ -19,6 +19,7 @@ Status code table (Deliverable 18):
 import json
 import os
 import uuid
+import traceback
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header, Depends
@@ -78,17 +79,29 @@ def health():
 
 @app.post("/transactions", status_code=202)
 def ingest(tx: Transaction):
-    # 3. Persist the raw transaction (idempotent by transaction_id)
-    record = tx.model_dump(mode="json")
-    record["received_at"] = datetime.now(timezone.utc).isoformat()
-    storage.persist_transaction(str(tx.transaction_id), json.dumps(record))
+    try:
+        # 3. Persist the raw transaction (idempotent by transaction_id)
+        record = tx.model_dump(mode="json")
+        record["received_at"] = datetime.now(timezone.utc).isoformat()
+        storage.persist_transaction(str(tx.transaction_id), json.dumps(record))
 
-    # Week 2 insertion point: publish the complete transaction record after persistence.
-    events.publish_transaction_received(record)
+        trace = {
+            "transaction_id": str(tx.transaction_id),
+            "received_at": record["received_at"],
+            "source": "api",
+            "status": "accepted"
+        }
+        storage.persist_trace(str(tx.transaction_id), json.dumps(trace))
 
-    # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
-    #    the only point in the sequence where it is safe (requirement 2.12).
-    return {"status": "accepted", "transaction_id": str(tx.transaction_id)}
+        events.publish_transaction_received(record)
+
+        # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
+        #    the only point in the sequence where it is safe (requirement 2.12).
+        return {"status": "accepted", "transaction_id": str(tx.transaction_id)}
+    except Exception as exc:
+        print("TRANSACTION_INGEST_FAILED", exc, file=os.sys.stderr)
+        traceback.print_exc(file=os.sys.stderr)
+        raise
 
 
 @app.post("/cases/{case_id}/documents", status_code=201)
