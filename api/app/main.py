@@ -27,7 +27,7 @@ from fastapi.responses import JSONResponse
 
 from . import auth
 from .contract import Transaction
-from . import storage, events
+from . import storage, events, ratelimit
 
 app = FastAPI(title="Centinela — Ingestion API", version="0.1.0")
 
@@ -47,6 +47,16 @@ def _require_analyst_access(x_ms_client_principal: str | None = Header(default=N
         raise HTTPException(401, detail={"error": str(exc)}) from exc
     except PermissionError as exc:
         raise HTTPException(403, detail={"error": "analyst_role_required"})
+
+
+@app.middleware("http")
+async def _rate_limit_transactions(request: Request, call_next):
+    if request.method == "POST" and request.url.path == "/transactions":
+        allowed, details = ratelimit.check_request(request)
+        if not allowed:
+            return JSONResponse(status_code=429,
+                                content={"error": "rate_limit_exceeded", **details})
+    return await call_next(request)
 
 
 @app.exception_handler(RequestValidationError)
@@ -73,8 +83,8 @@ def ingest(tx: Transaction):
     record["received_at"] = datetime.now(timezone.utc).isoformat()
     storage.persist_transaction(str(tx.transaction_id), json.dumps(record))
 
-    # Week 2 insertion point (no-op today): publish event after persisting.
-    events.publish_transaction_received(str(tx.transaction_id))
+    # Week 2 insertion point: publish the complete transaction record after persistence.
+    events.publish_transaction_received(record)
 
     # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
     #    the only point in the sequence where it is safe (requirement 2.12).

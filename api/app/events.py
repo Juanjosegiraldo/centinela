@@ -2,12 +2,14 @@
 
 import json
 import os
-from functools import lru_cache
 from datetime import datetime, timezone
+from functools import lru_cache
 
 try:
+    from azure.identity import DefaultAzureCredential
     from azure.servicebus import ServiceBusClient, ServiceBusMessage
 except ImportError:  # pragma: no cover - local/dev fallback
+    DefaultAzureCredential = None
     ServiceBusClient = None
     ServiceBusMessage = None
 
@@ -18,20 +20,27 @@ SERVICEBUS_TOPIC = os.environ.get("SBUS_TOPIC", "transaction-received")
 
 
 @lru_cache(maxsize=1)
+def _credential():
+    if DefaultAzureCredential is None:
+        return None
+    return DefaultAzureCredential()
+
+
+@lru_cache(maxsize=1)
 def _servicebus_client():
     if ServiceBusClient is None or SERVICEBUS_FQDN is None:
         return None
-    return ServiceBusClient(fully_qualified_namespace=SERVICEBUS_FQDN, credential=storage._credential())
+    return ServiceBusClient(fully_qualified_namespace=SERVICEBUS_FQDN, credential=_credential())
 
 
 def _local_event_path():
     return storage._local_path("topic-messages.jsonl")
 
 
-def publish_transaction_received(transaction_id: str) -> None:
+def publish_transaction_received(record: dict) -> None:
     event = {
         "event_type": "transaction.received",
-        "transaction_id": transaction_id,
+        "record": record,
         "published_at": datetime.now(timezone.utc).isoformat(),
         "topic": SERVICEBUS_TOPIC,
     }
