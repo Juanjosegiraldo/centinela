@@ -1,4 +1,4 @@
-.venv/
+﻿.venv/
 .venv-1/
 __pycache__/
 *.pyc
@@ -10,3 +10,6 @@ __pycache__/
 azurite_data/
 centinela.rar
 tests/jira_issues.json
+*.py[cod]
+.pytest_cache/
+data/

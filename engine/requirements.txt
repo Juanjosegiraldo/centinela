@@ -1,0 +1,19 @@
+# Azure Functions Python worker (v2 programming model).
+azure-functions
+
+# Managed identity for all data-plane access (no keys, no connection strings).
+azure-identity
+
+# Cosmos DB: read account history and persist scored transactions (Block 4).
+azure-cosmos
+
+# Case store + flagged-cases publishing (Block 5): read the SQL connection
+# string from Key Vault, write case rows via ODBC, and enqueue flagged cases.
+# The Service Bus topic TRIGGER needs no SDK (binding ships in the host.json
+# extension bundle); azure-servicebus here is for PUBLISHING to flagged-cases.
+azure-keyvault-secrets
+pyodbc
+azure-servicebus
+
+# Deploy prerequisite: the Function's Linux worker needs the Microsoft ODBC
+# driver (msodbcsql18) available for pyodbc to reach Azure SQL.
