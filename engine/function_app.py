@@ -1,9 +1,18 @@
 import json
+import logging
 import math
 import os
 from datetime import datetime, timezone
 
-from api.app import storage
+try:  # package context (local runs and unit tests)
+    from . import store
+except ImportError:  # top-level context (Azure Functions host loads function_app.py)
+    import store
+
+try:
+    import azure.functions as func
+except ImportError:  # pragma: no cover - Functions runtime absent in local/dev
+    func = None
 
 
 DEFAULT_THRESHOLD = 50
@@ -17,10 +26,6 @@ RULE_WEIGHTS = {
     "atypical_amount": 30,
     "risky_merchant": 25,
 }
-
-
-def _load_transaction_payload(transaction_id: str) -> dict:
-    return storage.load_transaction(transaction_id)
 
 
 def _threshold() -> int:
@@ -50,16 +55,14 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return radius_km * c
 
 
-def _score_rules(payload: dict) -> list[dict]:
+def _score_rules(payload: dict, history: list[dict]) -> list[dict]:
     rules: list[dict] = []
-    account_id = payload.get("account_id")
     amount_minor = int(payload.get("amount_minor", 0))
     occurred_at = payload.get("occurred_at")
     location = payload.get("location") or {}
     merchant_id = str(payload.get("merchant_id", "")).lower()
     merchant_category = str(payload.get("merchant_category", "")).lower()
 
-    history = storage.load_account_history(account_id) if account_id else []
     occurred_dt = _parse_datetime(occurred_at)
     now = datetime.now(timezone.utc)
 
@@ -131,27 +134,70 @@ def _score_rules(payload: dict) -> list[dict]:
     return rules
 
 
-def process_transaction_event(transaction_id: str) -> dict:
-    payload = _load_transaction_payload(transaction_id)
-    if not payload:
-        raise ValueError(f"transaction {transaction_id} not found")
-
-    rules = _score_rules(payload)
+def score_transaction(payload: dict, history: list[dict]) -> dict:
+    """Pure scoring, no I/O. Given a transaction and its account history,
+    return the weighted score, the rule breakdown and the case decision."""
+    rules = _score_rules(payload, history)
     triggered = [rule for rule in rules if rule.get("triggered")]
     score = sum(RULE_WEIGHTS.get(rule["id"], 0) for rule in triggered)
-    scored_at = datetime.now(timezone.utc).isoformat()
-
     threshold = _threshold()
-    case_enqueued = score >= threshold
-    result = {
-        "transaction_id": transaction_id,
+    return {
+        "transaction_id": str(payload.get("transaction_id", "")),
         "scored": True,
         "score": score,
         "rules": rules,
-        "scored_at": scored_at,
-        "case_enqueued": case_enqueued,
+        "scored_at": datetime.now(timezone.utc).isoformat(),
+        "case_enqueued": score >= threshold,
     }
 
-    payload.update(result)
-    storage.persist_transaction(transaction_id, json.dumps(payload))
+
+def handle_transaction(payload: dict) -> dict:
+    """Score a transaction and persist the scored record. Single entry point
+    shared by the Service Bus trigger and the by-id helper below."""
+    account_id = payload.get("account_id")
+    history = store.load_account_history(account_id) if account_id else []
+    result = score_transaction(payload, history)
+
+    scored_record = {**payload, **result}
+    store.persist_scored_transaction(result["transaction_id"], scored_record)
+
+    # Block 5 seam: when result["case_enqueued"] is True, open a case row in
+    # Azure SQL (casesdb) and enqueue it on the flagged-cases queue.
     return result
+
+
+def process_transaction_event(transaction_id: str) -> dict:
+    """Score a transaction already stored, addressed by id (tests / manual runs)."""
+    payload = store.load_transaction(transaction_id)
+    if not payload:
+        raise ValueError(f"transaction {transaction_id} not found")
+    return handle_transaction(payload)
+
+
+# ---------------------------------------------------------------------------
+# Azure Functions v2 entry point: Service Bus topic trigger.
+#
+# The API publishes the full transaction record to the `transaction-received`
+# topic; this function consumes the `scoring-engine` subscription. Topic and
+# subscription names come from app settings (%SBUS_TOPIC% / %SBUS_SUBSCRIPTION%).
+# The connection is identity-based (managed identity, no keys): set the app
+# setting ServiceBusConnection__fullyQualifiedNamespace =
+# <namespace>.servicebus.windows.net. The trigger binding is supplied by the
+# extension bundle in host.json, so no azure-servicebus dependency is required.
+# ---------------------------------------------------------------------------
+if func is not None:  # pragma: no cover - exercised by the Functions runtime
+    app = func.FunctionApp()
+
+    @app.service_bus_topic_trigger(
+        arg_name="message",
+        topic_name="%SBUS_TOPIC%",
+        subscription_name="%SBUS_SUBSCRIPTION%",
+        connection="ServiceBusConnection",
+    )
+    def score_on_transaction_received(message: "func.ServiceBusMessage") -> None:
+        payload = json.loads(message.get_body().decode("utf-8"))
+        result = handle_transaction(payload)
+        logging.info(
+            "scored transaction %s: score=%s case=%s",
+            result["transaction_id"], result["score"], result["case_enqueued"],
+        )
