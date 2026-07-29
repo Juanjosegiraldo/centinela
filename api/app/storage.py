@@ -32,7 +32,9 @@ QUEUE_ACCOUNT_URL = os.environ.get("QUEUE_ACCOUNT_URL")
 TX_CONTAINER = os.environ.get("TX_CONTAINER", "raw-transactions")
 DOCS_CONTAINER = os.environ.get("DOCS_CONTAINER", "verification-docs")
 QUEUE_NAME = os.environ.get("QUEUE_NAME", "q-incoming-transactions")
+POISON_QUEUE_NAME = os.environ.get("POISON_QUEUE_NAME", "q-poison-transactions")
 LOCAL_STORAGE_ROOT = os.environ.get("CENTINELA_LOCAL_STORAGE")
+POISON_THRESHOLD = int(os.environ.get("POISON_THRESHOLD", "5"))
 
 
 @lru_cache(maxsize=1)
@@ -202,3 +204,75 @@ def enqueue_transaction(transaction_id: str) -> str:
     with queue_file.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"transaction_id": transaction_id}) + "\n")
     return transaction_id
+
+
+def _poison_queue():
+    if QueueClient is None or QUEUE_ACCOUNT_URL is None:
+        return None
+    return QueueClient(account_url=QUEUE_ACCOUNT_URL, queue_name=POISON_QUEUE_NAME,
+                       credential=_credential())
+
+
+def receive_next_transaction() -> dict | None:
+    if queue() is not None:
+        message = queue().receive_message(
+            visibility_timeout=30,
+            message_count=1,
+        )
+        if message is None:
+            return None
+        payload = {"transaction_id": message.content.decode("utf-8"), "message_id": message.id}
+        return payload
+
+    queue_file = _local_path("queue-messages.jsonl")
+    if not queue_file.exists():
+        return None
+    with queue_file.open("r", encoding="utf-8") as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    if not lines:
+        return None
+    payload = json.loads(lines[0])
+    with queue_file.open("w", encoding="utf-8") as handle:
+        for line in lines[1:]:
+            handle.write(line + "\n")
+    return {"transaction_id": payload["transaction_id"], "message_id": payload.get("transaction_id")}
+
+
+def complete_transaction_message(message_id: str) -> None:
+    if queue() is not None:
+        queue().delete_message(message_id)
+        return
+
+    queue_file = _local_path("queue-messages.jsonl")
+    if not queue_file.exists():
+        return
+    # local fallback is already removed when read; nothing else to do
+
+
+def move_to_poison_queue(transaction_id: str, reason: str) -> None:
+    if _poison_queue() is not None:
+        _poison_queue().send_message(json.dumps({"transaction_id": transaction_id, "reason": reason}))
+        return
+
+    poison_file = _local_path("poison-queue.jsonl")
+    with poison_file.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"transaction_id": transaction_id, "reason": reason}) + "\n")
+
+
+def process_queue_message(handler, max_retries: int = POISON_THRESHOLD) -> dict | None:
+    message = receive_next_transaction()
+    if message is None:
+        return None
+
+    transaction_id = message["transaction_id"]
+    message_id = message.get("message_id")
+    try:
+        result = handler(transaction_id)
+        complete_transaction_message(message_id)
+        return result
+    except Exception as exc:
+        if message_id is not None and message_id in {"poison"}:
+            raise
+        move_to_poison_queue(transaction_id, str(exc))
+        complete_transaction_message(message_id)
+        return {"transaction_id": transaction_id, "status": "poisoned", "reason": str(exc)}
