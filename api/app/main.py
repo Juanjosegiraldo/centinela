@@ -19,6 +19,7 @@ Status code table (Deliverable 18):
 import json
 import os
 import uuid
+import traceback
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File
@@ -59,17 +60,22 @@ def health():
 
 @app.post("/transactions", status_code=202)
 def ingest(tx: Transaction):
-    # 3. Persist the raw transaction (idempotent by transaction_id)
-    record = tx.model_dump(mode="json")
-    record["received_at"] = datetime.now(timezone.utc).isoformat()
-    storage.persist_transaction(str(tx.transaction_id), json.dumps(record))
+    try:
+        # 3. Persist the raw transaction (idempotent by transaction_id)
+        record = tx.model_dump(mode="json")
+        record["received_at"] = datetime.now(timezone.utc).isoformat()
+        storage.persist_transaction(str(tx.transaction_id), json.dumps(record))
 
-    # Week 2 insertion point (no-op today): publish event after persisting.
-    events.publish_transaction_received(str(tx.transaction_id))
+        # Week 2 insertion point (no-op today): publish event after persisting.
+        events.publish_transaction_received(str(tx.transaction_id))
 
-    # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
-    #    the only point in the sequence where it is safe (requirement 2.12).
-    return {"status": "accepted", "transaction_id": str(tx.transaction_id)}
+        # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
+        #    the only point in the sequence where it is safe (requirement 2.12).
+        return {"status": "accepted", "transaction_id": str(tx.transaction_id)}
+    except Exception as exc:
+        print("TRANSACTION_INGEST_FAILED", exc, file=os.sys.stderr)
+        traceback.print_exc(file=os.sys.stderr)
+        raise
 
 
 @app.post("/cases/{case_id}/documents", status_code=201)

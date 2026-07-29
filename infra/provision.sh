@@ -22,8 +22,13 @@ VNET_CIDR="10.10.0.0/16"
 SNET_APP="snet-app";  SNET_APP_CIDR="10.10.1.0/26"   # /26 = 59 usable IPs (min /28 for VNet integration; /26 for Week 3 scaling)
 SNET_DATA="snet-data"; SNET_DATA_CIDR="10.10.2.0/27" # Week 2 SQL/Cosmos will live here
 SNET_OPS="snet-ops";   SNET_OPS_CIDR="10.10.3.0/27"  # management / future bastion
+SNET_CACHE="snet-cache"; SNET_CACHE_CIDR="10.10.4.0/27" # Week 3 cache / shared services placeholder
+SNET_PRIVATE="snet-private"; SNET_PRIVATE_CIDR="10.10.5.0/27" # private endpoints / isolated services placeholder
 NSG_APP="nsg-${PROJECT}-app-${ENVIRONMENT}"
 NSG_DATA="nsg-${PROJECT}-data-${ENVIRONMENT}"
+NSG_OPS="nsg-${PROJECT}-ops-${ENVIRONMENT}"
+NSG_CACHE="nsg-${PROJECT}-cache-${ENVIRONMENT}"
+NSG_PRIVATE="nsg-${PROJECT}-private-${ENVIRONMENT}"
 
 STG="st${PROJECT}${ENVIRONMENT}${UNIQUE_SUFFIX}"     # lowercase+digits only, globally unique
 DOCS_CONTAINER="verification-docs"
@@ -52,6 +57,9 @@ az network vnet create -g "$RG" -n "$VNET" --address-prefix "$VNET_CIDR" -o none
 
 az network nsg create -g "$RG" -n "$NSG_APP" -o none
 az network nsg create -g "$RG" -n "$NSG_DATA" -o none
+az network nsg create -g "$RG" -n "$NSG_OPS" -o none
+az network nsg create -g "$RG" -n "$NSG_CACHE" -o none
+az network nsg create -g "$RG" -n "$NSG_PRIVATE" -o none
 
 # Rule APP-100: HTTPS outbound from the app toward Azure Storage (service tag).
 # Justification: the API persists blobs and queue messages over TLS 443.
@@ -75,9 +83,23 @@ az network nsg rule create -g "$RG" --nsg-name "$NSG_DATA" -n Allow-Only-AppSubn
   --source-address-prefixes "$SNET_APP_CIDR" --source-port-ranges '*' \
   --destination-address-prefixes '*' --destination-port-ranges 443 -o none
 
+# Rule DATA-200: deny all outbound from the data subnet.
+# Justification: data stores should not initiate outbound flows.
+az network nsg rule create -g "$RG" --nsg-name "$NSG_DATA" -n Deny-All-Outbound \
+  --priority 4090 --direction Outbound --access Deny --protocol '*' \
+  --source-address-prefixes '*' --source-port-ranges '*' \
+  --destination-address-prefixes '*' --destination-port-ranges '*' -o none
+
 # Rule DATA-4096: deny everything else toward the data layer by default.
 az network nsg rule create -g "$RG" --nsg-name "$NSG_DATA" -n Deny-All-Inbound \
   --priority 4096 --direction Inbound --access Deny --protocol '*' \
+  --source-address-prefixes '*' --source-port-ranges '*' \
+  --destination-address-prefixes '*' --destination-port-ranges '*' -o none
+
+# Rule APP-4096: deny all outbound from the app subnet by default.
+# Justification: only explicitly allowed app egress flows should be possible.
+az network nsg rule create -g "$RG" --nsg-name "$NSG_APP" -n Deny-All-Outbound \
+  --priority 4096 --direction Outbound --access Deny --protocol '*' \
   --source-address-prefixes '*' --source-port-ranges '*' \
   --destination-address-prefixes '*' --destination-port-ranges '*' -o none
 
@@ -93,7 +115,16 @@ az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$SNET_DATA" \
   --network-security-group "$NSG_DATA" -o none
 
 az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$SNET_OPS" \
-  --address-prefixes "$SNET_OPS_CIDR" -o none
+  --address-prefixes "$SNET_OPS_CIDR" \
+  --network-security-group "$NSG_OPS" -o none
+
+az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$SNET_CACHE" \
+  --address-prefixes "$SNET_CACHE_CIDR" \
+  --network-security-group "$NSG_CACHE" -o none
+
+az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$SNET_PRIVATE" \
+  --address-prefixes "$SNET_PRIVATE_CIDR" \
+  --network-security-group "$NSG_PRIVATE" -o none
 
 # ----------------------------- STORAGE ---------------------------------------
 echo ">> Storage account: $STG"
