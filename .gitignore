@@ -4,3 +4,24 @@ __pycache__/
 *.pyd
 .pytest_cache/
 data/
+
+# Node / frontend
+node_modules/
+
+# Next.js build
+.next/
+out/
+
+# Python virtual env
+.venv/
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+
+# Editor configs
+.vscode/
+.idea/
