@@ -24,12 +24,32 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Header, Depends
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from . import auth
 from .contract import Transaction
 from . import storage, events, ratelimit
 
 app = FastAPI(title="Centinela — Ingestion API", version="0.1.0")
+
+# CORS: let the browser demo console call the ingestion API. Origins come from
+# CORS_ALLOWED_ORIGINS (comma-separated app setting); default is the local
+# Next.js dev server. No credentials are sent, so the allowlist stays explicit
+# and we never fall back to a wildcard "*".
+_cors_origins = [
+    origin.strip()
+    for origin in os.environ.get(
+        "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:3001"
+    ).split(",")
+    if origin.strip()
+]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "5")) * 1024 * 1024
 
