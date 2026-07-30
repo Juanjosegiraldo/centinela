@@ -128,6 +128,40 @@ def load_account_history(account_id: str) -> list[dict]:
     return history
 
 
+def _case_documents_index_path() -> Path:
+    return _local_path("case-documents.jsonl")
+
+
+def _append_case_document_state(case_id: str, document_name: str, status: str, outcome: str, notification: str, metadata: dict | None = None) -> None:
+    index_path = _case_documents_index_path()
+    record = {
+        "case_id": case_id,
+        "document_name": document_name,
+        "status": status,
+        "outcome": outcome,
+        "notification": notification,
+        "metadata": metadata or {},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with index_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+
+
+def list_case_documents(case_id: str) -> list[dict]:
+    index_path = _case_documents_index_path()
+    if not index_path.exists():
+        return []
+    rows = []
+    with index_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            if record.get("case_id") == case_id:
+                rows.append(record)
+    return rows
+
+
 def store_document(target_name: str, data: bytes, content_type: str) -> str:
     if _blobs() is not None:
         _blobs().get_blob_client(DOCS_CONTAINER, target_name).upload_blob(

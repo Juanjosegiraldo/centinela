@@ -5,8 +5,11 @@ from base64 import b64encode
 import json
 from pathlib import Path
 
+from fastapi.testclient import TestClient
+
 from api.app.auth import principal_roles, require_analyst_access
 from api.app import storage
+from api.app.main import app
 
 
 class DocumentAccessLinkTests(unittest.TestCase):
@@ -14,6 +17,7 @@ class DocumentAccessLinkTests(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory(prefix="centinela-docs-")
         os.environ["CENTINELA_LOCAL_STORAGE"] = self.tempdir.name
         os.environ.pop("STORAGE_ACCOUNT_URL", None)
+        self.client = TestClient(app)
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -51,6 +55,30 @@ class DocumentAccessLinkTests(unittest.TestCase):
         header = b64encode(json.dumps(principal).encode("utf-8")).decode("ascii")
         self.assertEqual(principal_roles(header), {"Analyst", "Reader"})
 
+    def test_corrupt_document_is_recorded_without_blocking_case_flow(self) -> None:
+        header = self._analyst_header()
+        response = self.client.post(
+            "/cases/case-123/documents",
+            files={"file": ("bad.bin", b"\x00\x01\x02", "application/octet-stream")},
+            headers={"x-ms-client-principal": header},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["status"], "rejected")
+        self.assertEqual(body["outcome"], "unsupported_format")
+        self.assertIn("notification", body)
+
+        list_response = self.client.get(
+            "/cases/case-123/documents",
+            headers={"x-ms-client-principal": header},
+        )
+        self.assertEqual(list_response.status_code, 200)
+        documents = list_response.json()["documents"]
+        self.assertEqual(len(documents), 1)
+        self.assertEqual(documents[0]["status"], "rejected")
+        self.assertEqual(documents[0]["outcome"], "unsupported_format")
+
     def test_require_analyst_access_rejects_other_roles(self) -> None:
         principal = {
             "auth_typ": "aad",
@@ -60,6 +88,14 @@ class DocumentAccessLinkTests(unittest.TestCase):
         header = b64encode(json.dumps(principal).encode("utf-8")).decode("ascii")
         with self.assertRaises(PermissionError):
             require_analyst_access(header)
+
+    def _analyst_header(self) -> str:
+        principal = {
+            "auth_typ": "aad",
+            "role_typ": "roles",
+            "claims": [{"typ": "roles", "val": "Analyst"}],
+        }
+        return b64encode(json.dumps(principal).encode("utf-8")).decode("ascii")
 
 
 if __name__ == "__main__":
