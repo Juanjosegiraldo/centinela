@@ -132,6 +132,34 @@ async function sendTransactionToApi(transaction: TransactionDraft): Promise<ApiA
     };
   }
 }
+// Real mode: let the engine persist a seed to Cosmos before the main tx is
+// scored, so history rules (velocity/geo) fire against the real backend.
+const SEED_SETTLE_MS = 10000;
+
+type RealScore = { scored: boolean; score?: number; caseEnqueued?: boolean; rules?: RuleHit[] };
+
+async function pollScore(transactionId: string, attempts = 8, intervalMs = 2000): Promise<RealScore> {
+  for (let i = 0; i < attempts; i++) {
+    await wait(intervalMs);
+    try {
+      const res = await fetch(`${API_BASE}/transactions/${transactionId}`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.scored) {
+        return {
+          scored: true,
+          score: data.score,
+          caseEnqueued: data.case_enqueued,
+          rules: (data.rules_triggered ?? []) as RuleHit[],
+        };
+      }
+    } catch {
+      // network hiccup — keep polling
+    }
+  }
+  return { scored: false };
+}
+
 const ALLOWED_TRANSACTION_FIELDS = new Set([
   "transaction_id",
   "account_id",
@@ -618,8 +646,16 @@ export default function ConsolePage() {
     setBusy(true);
     setPanelMessage(`${scenario.label}: aceptando en cliente mientras el analisis sigue en paralelo.`);
 
-    // Hybrid: real POST /transactions to the deployed API for a real 202 and a
-    // real acknowledgment latency. Scoring below stays simulated (no read API yet).
+    // Real mode: seed the backend first so history rules (velocity/geo) can fire.
+    for (const seed of scenario.seeds) {
+      await sendTransactionToApi(seed);
+    }
+    if (scenario.seeds.length > 0) {
+      setPanelMessage(`${scenario.label}: sembrando historial en el backend real...`);
+      await wait(SEED_SETTLE_MS);
+    }
+
+    // Real POST /transactions for a real 202 + real acknowledgment latency.
     const apiAck = await sendTransactionToApi(scenario.transaction);
     const ackMs = apiAck.ms > 0 ? apiAck.ms : scenario.timings.ackMs;
     const apiNote =
@@ -672,17 +708,22 @@ export default function ConsolePage() {
       return;
     }
 
-    await wait(scenario.timings.analysisMs);
-    const analysisMs = scenario.timings.analysisMs;
     const scoring = scoreTransaction(scenario.transaction, virtualHistory);
+    // Real mode: poll the read API for the engine's actual score from Cosmos.
+    setPanelMessage(`${scenario.label}: consultando el score real del backend...`);
+    const real = await pollScore(scenario.transaction.transaction_id);
+    const analysisMs = scenario.timings.analysisMs;
+    const finalScore = real.scored ? real.score! : scoring.score;
+    const finalCase = real.scored ? real.caseEnqueued! : scoring.caseEnqueued;
+    const finalRules = real.scored ? real.rules! : scoring.rules;
     const acceptedRecord: HistoryEntry = {
       ...scenario.transaction,
       label: scenario.label,
       kind: "accepted",
       recordedAt: new Date().toISOString(),
-      score: scoring.score,
-      caseEnqueued: scoring.caseEnqueued,
-      rules: scoring.rules,
+      score: finalScore,
+      caseEnqueued: finalCase,
+      rules: finalRules,
     };
 
     if (scenario.seeds.length > 0) {
@@ -707,18 +748,19 @@ export default function ConsolePage() {
       ackMs,
       analysisMs,
       note: scenario.note,
-      score: scoring.score,
-      caseEnqueued: scoring.caseEnqueued,
-      rules: scoring.rules,
+      score: finalScore,
+      caseEnqueued: finalCase,
+      rules: finalRules,
       startedAt: new Date().toISOString(),
     };
 
     setCurrentRun(summary);
     setRuns((previous) => [summary, ...previous].slice(0, 8));
     setPanelMessage(
-      scoring.caseEnqueued
-        ? "Aceptado y marcado para caso. La consola evidencio separacion entre ack y analisis."
-        : "Aceptado sin caso. La consola mostro el desacople entre respuesta y analisis.",
+      (finalCase ? "Aceptado y marcado para caso." : "Aceptado sin caso.") +
+        (real.scored
+          ? ` Score REAL del backend: ${finalScore}.`
+          : ` Score simulado (el backend no respondio a tiempo): ${finalScore}.`),
     );
     setBusy(false);
   }
