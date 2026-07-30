@@ -28,7 +28,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from . import auth
 from .contract import Transaction
-from . import storage, events, ratelimit
+from . import storage, events, ratelimit, scored
 
 app = FastAPI(title="Centinela — Ingestion API", version="0.1.0")
 
@@ -109,6 +109,27 @@ def ingest(tx: Transaction):
     # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
     #    the only point in the sequence where it is safe (requirement 2.12).
     return {"status": "accepted", "transaction_id": str(tx.transaction_id)}
+
+
+@app.get("/transactions/{transaction_id}")
+def get_transaction_score(transaction_id: str):
+    """Read-side endpoint: return the engine's scored result for a transaction.
+
+    The engine scores asynchronously, so callers poll this: `scored: false`
+    (status "pending") until the analysis lands in Cosmos, then the real score,
+    case decision and triggered rules.
+    """
+    record = scored.get_scored_transaction(transaction_id)
+    if record is None:
+        return {"transaction_id": transaction_id, "scored": False, "status": "pending"}
+    return {
+        "transaction_id": transaction_id,
+        "scored": True,
+        "score": record.get("score"),
+        "case_enqueued": record.get("case_enqueued"),
+        "rules_triggered": record.get("rules_triggered", []),
+        "scored_at": record.get("scored_at"),
+    }
 
 
 @app.post("/cases/{case_id}/documents", status_code=201)
