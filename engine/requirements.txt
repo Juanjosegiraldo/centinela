@@ -8,12 +8,17 @@ azure-identity
 azure-cosmos
 
 # Case store + flagged-cases publishing (Block 5): read the SQL connection
-# string from Key Vault, write case rows via ODBC, and enqueue flagged cases.
-# The Service Bus topic TRIGGER needs no SDK (binding ships in the host.json
-# extension bundle); azure-servicebus here is for PUBLISHING to flagged-cases.
+# string from Key Vault and enqueue flagged cases. The Service Bus topic TRIGGER
+# needs no SDK (binding ships in the host.json extension bundle); azure-servicebus
+# here is for PUBLISHING to flagged-cases.
 azure-keyvault-secrets
-pyodbc
 azure-servicebus
 
-# Deploy prerequisite: the Function's Linux worker needs the Microsoft ODBC
-# driver (msodbcsql18) available for pyodbc to reach Azure SQL.
+# pyodbc is DEFERRED to Week 3. It is a native build and needs the Microsoft ODBC
+# driver (msodbcsql18) on the Function's Linux worker, which App Service does not
+# provide by default. Shipping it here aborted the pip install and left
+# azure-servicebus uninstalled, so flagged-cases never got written. cases.py
+# degrades gracefully when pyodbc is absent (SQL case rows are skipped;
+# flagged-cases still works). Re-add once the driver is provisioned via a startup
+# script or a custom container.
+# pyodbc
