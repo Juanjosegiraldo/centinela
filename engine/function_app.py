@@ -3,6 +3,7 @@ import logging
 import math
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 try:  # package context (local runs and unit tests)
     from . import store, cases
@@ -31,6 +32,40 @@ RULE_WEIGHTS = {
 
 def _threshold() -> int:
     return int(os.environ.get("SCORING_THRESHOLD", str(DEFAULT_THRESHOLD)))
+
+
+def _telemetry_path() -> Path:
+    root_env = os.environ.get("CENTINELA_LOCAL_STORAGE")
+    root = Path(root_env) if root_env else Path(__file__).resolve().parent.parent / "data"
+    root.mkdir(parents=True, exist_ok=True)
+    return root / "scoring-telemetry.jsonl"
+
+
+def emit_scoring_telemetry(transaction_id: str, duration_ms: int, outcome: str, score: int) -> None:
+    telemetry_path = _telemetry_path()
+    payload = {
+        "transaction_id": transaction_id,
+        "duration_ms": duration_ms,
+        "outcome": outcome,
+        "score": score,
+        "emitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with telemetry_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
+
+
+def load_scoring_telemetry(transaction_id: str) -> dict | None:
+    telemetry_path = _telemetry_path()
+    if not telemetry_path.exists():
+        return None
+    with telemetry_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if payload.get("transaction_id") == transaction_id:
+                return payload
+    return None
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -156,6 +191,7 @@ def score_transaction(payload: dict, history: list[dict]) -> dict:
 def handle_transaction(payload: dict) -> dict:
     """Score a transaction and persist the scored record. Single entry point
     shared by the Service Bus trigger and the by-id helper below."""
+    started_at = datetime.now(timezone.utc)
     account_id = payload.get("account_id")
     history = store.load_account_history(account_id) if account_id else []
     result = score_transaction(payload, history)
@@ -165,6 +201,10 @@ def handle_transaction(payload: dict) -> dict:
 
     if result["case_enqueued"]:
         cases.open_case(result, payload)
+
+    duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+    outcome = "case_opened" if result["case_enqueued"] else "scored_only"
+    emit_scoring_telemetry(result["transaction_id"], duration_ms, outcome, result["score"])
     return result
 
 
