@@ -94,6 +94,44 @@ const CASE_THRESHOLD = 50;
 const VELOCITY_WINDOW_SECONDS = 600;
 const MAX_AMOUNT_MINOR = 50_000_000_000;
 const MIN_FUTURE_SKEW_SECONDS = 120;
+
+// Hybrid mode: the console posts real transactions to the deployed ingestion
+// API for a real 202 + real acknowledgment latency. Scoring stays simulated
+// (there is no read API yet). Configure the origin with NEXT_PUBLIC_API_URL.
+const API_BASE =
+  process.env.NEXT_PUBLIC_API_URL ??
+  "https://app-ctn-ingest-dev-jj15.azurewebsites.net";
+
+type ApiAck = { status: number; ms: number; error?: string };
+
+async function sendTransactionToApi(transaction: TransactionDraft): Promise<ApiAck> {
+  // Send only the contract fields — the API rejects unknown fields (extra=forbid).
+  const payload = {
+    transaction_id: transaction.transaction_id,
+    account_id: transaction.account_id,
+    amount_minor: transaction.amount_minor,
+    currency: transaction.currency,
+    occurred_at: transaction.occurred_at,
+    location: { lat: transaction.location.lat, lon: transaction.location.lon },
+    merchant_id: transaction.merchant_id,
+    merchant_category: transaction.merchant_category,
+  };
+  const startedAt = performance.now();
+  try {
+    const response = await fetch(`${API_BASE}/transactions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return { status: response.status, ms: Math.round(performance.now() - startedAt) };
+  } catch (error) {
+    return {
+      status: 0,
+      ms: Math.round(performance.now() - startedAt),
+      error: error instanceof Error ? error.message : "network error",
+    };
+  }
+}
 const ALLOWED_TRANSACTION_FIELDS = new Set([
   "transaction_id",
   "account_id",
@@ -580,8 +618,15 @@ export default function ConsolePage() {
     setBusy(true);
     setPanelMessage(`${scenario.label}: aceptando en cliente mientras el analisis sigue en paralelo.`);
 
-    await wait(scenario.timings.ackMs);
-    const ackMs = scenario.timings.ackMs;
+    // Hybrid: real POST /transactions to the deployed API for a real 202 and a
+    // real acknowledgment latency. Scoring below stays simulated (no read API yet).
+    const apiAck = await sendTransactionToApi(scenario.transaction);
+    const ackMs = apiAck.ms > 0 ? apiAck.ms : scenario.timings.ackMs;
+    const apiNote =
+      apiAck.status > 0
+        ? `API real: HTTP ${apiAck.status} en ${apiAck.ms} ms`
+        : `API no alcanzada (${apiAck.error ?? "error"}); latencia simulada`;
+    setPanelMessage(`${scenario.label}: ${apiNote}. Analisis simulado en paralelo.`);
 
     if (scenario.invalid) {
       const validationIssues = validateTransaction(scenario.transaction);
