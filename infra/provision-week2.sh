@@ -38,6 +38,9 @@ SBUS_TOPIC="transaction-received"        # EVENT distribution: notify it happene
 SBUS_SUBSCRIPTION="scoring-engine"
 SBUS_QUEUE="flagged-cases"               # QUEUE: guarantee processing
 
+# Document Intelligence F0 was validated in centralus on day 1.
+DI="di-${PROJECT}-${ENVIRONMENT}-${UNIQUE_SUFFIX}"
+
 # Secrets
 VAULT="kv-${PROJECT}-${ENVIRONMENT}-${UNIQUE_SUFFIX}"
 
@@ -108,6 +111,13 @@ az servicebus topic subscription create -g "$RG" --namespace-name "$SBUS" \
 az servicebus queue create -g "$RG" --namespace-name "$SBUS" -n "$SBUS_QUEUE" \
   --max-delivery-count 5 --enable-dead-lettering-on-message-expiration true -o none
 
+# ----------------------------- DOCUMENT INTELLIGENCE ------------------------
+echo ">> Document Intelligence: $DI (F0)"
+if ! az cognitiveservices account show -g "$RG" -n "$DI" -o none 2>/dev/null; then
+  az cognitiveservices account create -g "$RG" -n "$DI" -l "$LOCATION" \
+    --kind FormRecognizer --sku F0 -o none
+fi
+
 # ----------------------------- SECRETS (Key Vault) ---------------------------
 echo ">> Key Vault: $VAULT"
 az keyvault create -g "$RG" -n "$VAULT" -l "$LOCATION" \
@@ -142,11 +152,15 @@ sleep 20
 
 COSMOS_ENDPOINT=$(az cosmosdb show -g "$RG" -n "$COSMOS" --query documentEndpoint -o tsv)
 SBUS_FQDN="${SBUS}.servicebus.windows.net"
+DI_ENDPOINT=$(az cognitiveservices account show -g "$RG" -n "$DI" --query properties.endpoint -o tsv)
+DI_KEY=$(az cognitiveservices account keys list -g "$RG" -n "$DI" --query key1 -o tsv)
 SQL_CONN="Server=tcp:${SQL_SERVER}.database.windows.net,1433;Database=${SQL_DB};User ID=${SQL_ADMIN};Password=${SQL_PASSWORD};Encrypt=true;"
 
 az keyvault secret set --vault-name "$VAULT" -n sql-connection-string --value "$SQL_CONN" -o none
 az keyvault secret set --vault-name "$VAULT" -n cosmos-endpoint --value "$COSMOS_ENDPOINT" -o none
 az keyvault secret set --vault-name "$VAULT" -n servicebus-fqdn --value "$SBUS_FQDN" -o none
+az keyvault secret set --vault-name "$VAULT" -n document-intelligence-endpoint --value "$DI_ENDPOINT" -o none
+az keyvault secret set --vault-name "$VAULT" -n document-intelligence-key --value "$DI_KEY" -o none
 # Threshold as a secret/config value: changing it needs no redeploy (Deliverable 6).
 az keyvault secret set --vault-name "$VAULT" -n score-threshold --value "$SCORE_THRESHOLD" -o none
 
@@ -202,7 +216,92 @@ az webapp config appsettings set -g "$RG" -n "$WEBAPP" --settings \
   KEY_VAULT_URL="https://${VAULT}.vault.azure.net" \
   SERVICEBUS_FQDN="$SBUS_FQDN" \
   SBUS_TOPIC="$SBUS_TOPIC" \
+  DOCUMENTINTELLIGENCE_ENDPOINT="$DI_ENDPOINT" \
+  DOCUMENTINTELLIGENCE_KEY="@Microsoft.KeyVault(SecretUri=https://${VAULT}.vault.azure.net/secrets/document-intelligence-key)" \
   RATE_LIMIT_PER_MINUTE="60" -o none
+
+WEBAPP_ID=$(az webapp show -g "$RG" -n "$WEBAPP" --query id -o tsv)
+FUNC_ID=$(az functionapp show -g "$RG" -n "$FUNC" --query id -o tsv)
+WEBAPP_LOCATION=$(az webapp show -g "$RG" -n "$WEBAPP" --query location -o tsv)
+FUNC_LOCATION=$(az functionapp show -g "$RG" -n "$FUNC" --query location -o tsv)
+SBUS_ID=$(az servicebus namespace show -g "$RG" -n "$SBUS" --query id -o tsv)
+SBUS_SUBSCRIPTION_RESOURCE="${SBUS_ID}/topics/${SBUS_TOPIC}/subscriptions/${SBUS_SUBSCRIPTION}"
+
+create_autoscale_setting() {
+  local autoscale_name="$1"
+  local target_resource_id="$2"
+  local target_location="$3"
+  local metric_name="$4"
+  local metric_resource_uri="$5"
+  local scale_out_threshold="$6"
+  local scale_in_threshold="$7"
+  local json_path
+  json_path=$(mktemp)
+
+  cat > "$json_path" <<EOF
+{
+  "location": "$target_location",
+  "properties": {
+    "targetResourceUri": "$target_resource_id",
+    "enabled": true,
+    "profiles": [
+      {
+        "name": "default",
+        "capacity": { "minimum": "1", "maximum": "3", "default": "1" },
+        "rules": [
+          {
+            "metricTrigger": {
+              "metricName": "$metric_name",
+              "metricResourceUri": "$metric_resource_uri",
+              "timeGrain": "PT1M",
+              "statistic": "Average",
+              "timeWindow": "PT10M",
+              "timeAggregation": "Average",
+              "operator": "GreaterThan",
+              "threshold": $scale_out_threshold
+            },
+            "scaleAction": {
+              "direction": "Increase",
+              "type": "ChangeCount",
+              "value": "1",
+              "cooldown": "PT5M"
+            }
+          },
+          {
+            "metricTrigger": {
+              "metricName": "$metric_name",
+              "metricResourceUri": "$metric_resource_uri",
+              "timeGrain": "PT1M",
+              "statistic": "Average",
+              "timeWindow": "PT10M",
+              "timeAggregation": "Average",
+              "operator": "LessThan",
+              "threshold": $scale_in_threshold
+            },
+            "scaleAction": {
+              "direction": "Decrease",
+              "type": "ChangeCount",
+              "value": "1",
+              "cooldown": "PT5M"
+            }
+          }
+        ]
+      }
+    ],
+    "notifications": []
+  }
+}
+EOF
+
+  az rest --method put \
+    --uri "https://management.azure.com${target_resource_id}/providers/Microsoft.Insights/autoscalesettings/${autoscale_name}?api-version=2022-10-01" \
+    --body @"$json_path" -o none
+
+  rm -f "$json_path"
+}
+
+create_autoscale_setting "${WEBAPP}-autoscale" "$WEBAPP_ID" "$WEBAPP_LOCATION" "HttpQueueLength" "$WEBAPP_ID" 10 3
+create_autoscale_setting "${FUNC}-autoscale" "$FUNC_ID" "$FUNC_LOCATION" "ActiveMessages" "$SBUS_SUBSCRIPTION_RESOURCE" 20 3
 
 # ----------------------------- OUTPUT ----------------------------------------
 echo ""
@@ -213,6 +312,7 @@ echo "                 partition=$PARTITION_KEY  ttl=${TTL_SECONDS}s  consistenc
 echo "  Azure SQL    : ${SQL_SERVER}.database.windows.net / $SQL_DB (subnet-only)"
 echo "  Service Bus  : $SBUS"
 echo "                 topic=$SBUS_TOPIC (event)  queue=$SBUS_QUEUE (guaranteed)"
+echo "  Doc Intel    : $DI (F0)"
 echo "  Key Vault    : $VAULT (threshold=$SCORE_THRESHOLD, changeable without redeploy)"
 echo "  Function App : $FUNC (scoring engine)"
 echo "  SQL password : stored ONLY in Key Vault secret 'sql-connection-string'"
