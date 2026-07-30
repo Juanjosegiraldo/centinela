@@ -114,7 +114,16 @@ async def upload_document(case_id: str, file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(409, detail={"error": "storage_conflict"})
 
-    return {"status": "stored", "blob": target_name, "document_name": document_name}
+    extracted_identity = storage.extract_identity_fields(data, content_type)
+    if extracted_identity:
+        storage.attach_case_identity(case_id, extracted_identity)
+
+    return {
+        "status": "stored",
+        "blob": target_name,
+        "document_name": document_name,
+        "extracted_identity": extracted_identity,
+    }
 
 
 @app.get("/cases/{case_id}/documents/{document_name}/access-link")

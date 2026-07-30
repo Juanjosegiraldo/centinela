@@ -5,6 +5,7 @@ No keys or connection strings exist in code or configuration.
 """
 import json
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlparse
@@ -26,6 +27,13 @@ except ImportError:  # pragma: no cover - local/dev fallback
     ContentSettings = None
     generate_blob_sas = None
     QueueClient = None
+
+try:
+    from azure.ai.documentintelligence import DocumentIntelligenceClient
+    from azure.core.credentials import AzureKeyCredential
+except ImportError:  # pragma: no cover - local/dev fallback
+    DocumentIntelligenceClient = None
+    AzureKeyCredential = None
 
 STORAGE_ACCOUNT_URL = os.environ.get("STORAGE_ACCOUNT_URL")
 QUEUE_ACCOUNT_URL = os.environ.get("QUEUE_ACCOUNT_URL")
@@ -65,6 +73,161 @@ def _local_storage_dir() -> Path:
 
 def _local_path(name: str) -> Path:
     return _local_storage_dir() / name
+
+
+def _normalize_date(value: str | None) -> str | None:
+    if not value:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+    for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_via_document_intelligence(data: bytes) -> dict:
+    endpoint = os.environ.get("DOCUMENTINTELLIGENCE_ENDPOINT")
+    key = os.environ.get("DOCUMENTINTELLIGENCE_KEY")
+    if not endpoint or (not key and DefaultAzureCredential is None):
+        return {}
+    if DocumentIntelligenceClient is None:
+        return {}
+
+    try:
+        if key and AzureKeyCredential is not None:
+            client = DocumentIntelligenceClient(endpoint=endpoint, credential=AzureKeyCredential(key))
+        else:
+            client = DocumentIntelligenceClient(endpoint=endpoint, credential=DefaultAzureCredential())
+        poller = client.begin_analyze_document(
+            "prebuilt-idDocument",
+            analyze_request=data,
+            content_type="application/octet-stream",
+        )
+        result = poller.result()
+    except Exception:
+        return {}
+
+    def _read_field(names: list[str]):
+        for name in names:
+            field = getattr(result, "fields", {}).get(name)
+            if field is None:
+                continue
+            value = getattr(field, "value_string", None)
+            if value is None:
+                value = getattr(field, "value_date", None)
+            if value is None:
+                value = getattr(field, "content", None)
+            if value is not None:
+                return str(value)
+        return None
+
+    name = _read_field(["Name", "FullName", "GivenNames"])
+    identification_number = _read_field(["DocumentNumber", "IdentificationNumber", "IDNumber", "PassportNumber"])
+    birth_date = _read_field(["DateOfBirth", "BirthDate"])
+    issue_date = _read_field(["IssueDate", "DateOfIssue"])
+
+    metadata = {}
+    if name:
+        metadata["name"] = name
+    if identification_number:
+        metadata["identification_number"] = identification_number
+    if birth_date:
+        metadata["date_of_birth"] = _normalize_date(birth_date) or birth_date
+    if issue_date:
+        metadata["issue_date"] = _normalize_date(issue_date) or issue_date
+    if metadata:
+        metadata["source"] = "document-intelligence"
+    return metadata
+
+
+def extract_identity_fields(data: bytes, content_type: str | None = None) -> dict:
+    """Extract the most relevant identity fields from uploaded content.
+
+    The implementation uses a deterministic heuristic on text content so the
+    feature is testable locally. In Azure, the same function can be extended to
+    call Document Intelligence F0 when the endpoint and credentials are present.
+    """
+    azure_result = _extract_via_document_intelligence(data)
+    if azure_result:
+        return azure_result
+
+    text = data.decode("utf-8", errors="ignore")
+    if not text.strip():
+        return {}
+
+    def _find(patterns: list[str]) -> str | None:
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return None
+
+    name = _find([
+        r"\bname\s*[:\-]\s*(.+)",
+        r"\bfull\s+name\s*[:\-]\s*(.+)",
+    ])
+    identification_number = _find([
+        r"\bidentification\s+number\s*[:\-]\s*(.+)",
+        r"\bid\s*number\s*[:\-]\s*(.+)",
+        r"\bpassport\s*[:\-]\s*(.+)",
+    ])
+    date_of_birth = _normalize_date(_find([
+        r"\bdate\s+of\s+birth\s*[:\-]\s*(.+)",
+        r"\bbirth\s+date\s*[:\-]\s*(.+)",
+    ]))
+    issue_date = _normalize_date(_find([
+        r"\bissue\s+date\s*[:\-]\s*(.+)",
+        r"\bissued\s+on\s*[:\-]\s*(.+)",
+    ]))
+
+    metadata = {}
+    if name:
+        metadata["name"] = name
+    if identification_number:
+        metadata["identification_number"] = identification_number
+    if date_of_birth:
+        metadata["date_of_birth"] = date_of_birth
+    if issue_date:
+        metadata["issue_date"] = issue_date
+    metadata["source"] = "heuristic"
+    return metadata
+
+
+def attach_case_identity(case_id: str, metadata: dict) -> dict:
+    payload = {
+        "case_id": case_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+        **metadata,
+    }
+    blob_name = f"case-{case_id}.json"
+    if _blobs() is not None:
+        _blobs().get_blob_client(DOCS_CONTAINER, blob_name).upload_blob(
+            json.dumps(payload),
+            overwrite=True,
+            content_settings=ContentSettings(content_type="application/json"),
+        )
+        return payload
+
+    _local_path(blob_name).write_text(json.dumps(payload), encoding="utf-8")
+    return payload
+
+
+def load_case_identity(case_id: str) -> dict:
+    blob_name = f"case-{case_id}.json"
+    if _blobs() is not None:
+        blob = _blobs().get_blob_client(DOCS_CONTAINER, blob_name)
+        if not blob.exists():
+            return {}
+        return json.loads(blob.download_blob().readall())
+
+    path = _local_path(blob_name)
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def document_blob_name(case_id: str, document_name: str) -> str:
