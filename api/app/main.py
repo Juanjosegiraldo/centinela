@@ -17,6 +17,7 @@ Status code table (Deliverable 18):
   500  Internal error; the body never exposes traces or resource names.
 """
 import json
+import logging
 import os
 import uuid
 from datetime import datetime, timezone
@@ -105,6 +106,18 @@ def ingest(tx: Transaction):
 
     # Week 2 insertion point: publish the complete transaction record after persistence.
     events.publish_transaction_received(record)
+
+    # W3-09: record the API stage of the transaction's trace. Auxiliary — a
+    # trace failure must never fail the ingestion that was already persisted.
+    try:
+        storage.persist_trace(str(tx.transaction_id), {
+            "transaction_id": str(tx.transaction_id),
+            "received_at": record["received_at"],
+            "source": "api",
+            "status": "accepted",
+        })
+    except Exception:
+        logging.warning("trace persistence failed for %s", tx.transaction_id)
 
     # 4. Acknowledge. The acknowledgment is issued AFTER persisting:
     #    the only point in the sequence where it is safe (requirement 2.12).

@@ -260,6 +260,25 @@ def persist_transaction(transaction_id: str, payload_json: str) -> str:
     return blob_name
 
 
+def persist_trace(transaction_id: str, trace: dict) -> str:
+    """Ingest-stage trace record (W3-09): one JSON blob per transaction under
+    trace/ in the docs container, so the transaction's journey (API stage) is
+    reconstructable by id alongside the engine's telemetry in App Insights.
+    Blob-backed (survives restarts, shared across workers); local fallback."""
+    blob_name = f"trace/{transaction_id}.json"
+    payload_json = json.dumps(trace)
+    if _blobs() is not None:
+        _blobs().get_blob_client(DOCS_CONTAINER, blob_name).upload_blob(
+            payload_json, overwrite=True,
+            content_settings=ContentSettings(content_type="application/json"),
+        )
+        return blob_name
+    path = _local_path(blob_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(payload_json, encoding="utf-8")
+    return blob_name
+
+
 def load_transaction(transaction_id: str) -> dict:
     if _blobs() is not None:
         blob_name = f"{transaction_id}.json"
