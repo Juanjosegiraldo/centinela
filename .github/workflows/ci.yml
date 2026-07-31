@@ -1,0 +1,36 @@
+# Centinela — CI gate (W3-03)
+# Runs on every PR: unit suite + console build (TypeScript gate).
+# A red run blocks the merge once branch protection requires this check.
+name: ci
+
+on:
+  pull_request:
+    branches: [develop, main]
+  workflow_dispatch:
+
+jobs:
+  tests:
+    name: unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install API dependencies (tests import fastapi/pydantic)
+        run: pip install -r api/requirements.txt
+      - name: Run unit suite
+        run: python -m unittest discover -s tests -v
+
+  console:
+    name: console build (TypeScript gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build

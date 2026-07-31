@@ -1,0 +1,109 @@
+# Centinela — CD pipeline (W3-03)
+# On every merge to main: build → tests (a failure stops everything) →
+# container images → push to ACR → deploy API + engine + console → smoke test.
+# Auth: OIDC federated identity (id-cicd-ctn-dev) — no stored cloud secrets.
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # OIDC token for azure/login
+  contents: read
+
+env:
+  ACR: acrctndevjj15.azurecr.io
+  RG: rg-ctn-dev
+  API_APP: app-ctn-ingest-dev-jj15
+  ENGINE_APP: func-ctn-scoring-dev-jj15
+  WEB_STORAGE: stctnwebjj15
+  API_URL: https://app-ctn-ingest-dev-jj15.azurewebsites.net
+
+jobs:
+  test:
+    name: tests (gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r api/requirements.txt
+      - name: Unit suite — a failure stops the pipeline here
+        run: python -m unittest discover -s tests -v
+
+  build-console:
+    name: build console
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: console-out
+          path: out/
+          retention-days: 1
+
+  deploy:
+    name: images → ACR → deploy → smoke
+    needs: [test, build-console]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, no secrets)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Build and push images (tagged with the commit SHA)
+        run: |
+          TAG=${GITHUB_SHA::7}
+          az acr login -n acrctndevjj15
+          docker build -t $ACR/centinela-api:$TAG api/
+          docker build -t $ACR/centinela-engine:$TAG engine/
+          docker push $ACR/centinela-api:$TAG
+          docker push $ACR/centinela-engine:$TAG
+
+      - name: Point both apps at the new images
+        run: |
+          TAG=${GITHUB_SHA::7}
+          az webapp config container set -g $RG -n $API_APP \
+            --docker-custom-image-name $ACR/centinela-api:$TAG \
+            --docker-registry-server-url https://$ACR -o none
+          az functionapp config container set -g $RG -n $ENGINE_APP \
+            --image $ACR/centinela-engine:$TAG \
+            --registry-server https://$ACR -o none
+
+      - name: Deploy console static export
+        uses: actions/download-artifact@v4
+        with:
+          name: console-out
+          path: out
+      - run: |
+          az storage blob upload-batch -s out -d '$web' \
+            --account-name $WEB_STORAGE --auth-mode login --overwrite --only-show-errors
+
+      - name: Smoke test (health + one real transaction)
+        run: |
+          echo "waiting for the API container to restart..."
+          for i in $(seq 1 20); do
+            code=$(curl -s -m 15 -o /dev/null -w "%{http_code}" $API_URL/health || true)
+            [ "$code" = "200" ] && break
+            sleep 15
+          done
+          [ "$code" = "200" ] || { echo "health check failed ($code)"; exit 1; }
+          TX=$(python3 -c "import uuid,json,datetime;print(json.dumps({'transaction_id':str(uuid.uuid4()),'account_id':'acct-cicd-smoke','amount_minor':50000,'currency':'USD','occurred_at':datetime.datetime.now(datetime.timezone.utc).isoformat(),'location':{'lat':6.25,'lon':-75.56},'merchant_id':'m-smoke','merchant_category':'retail'}))")
+          status=$(curl -s -m 30 -o /dev/null -w "%{http_code}" -X POST "$API_URL/transactions" -H "Content-Type: application/json" -d "$TX")
+          [ "$status" = "202" ] || { echo "ingest smoke failed ($status)"; exit 1; }
+          echo "smoke OK: health 200 + ingest 202"
