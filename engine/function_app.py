@@ -3,6 +3,7 @@ import logging
 import math
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 try:  # package context (local runs and unit tests)
     from . import store, cases
@@ -31,6 +32,21 @@ RULE_WEIGHTS = {
 
 def _threshold() -> int:
     return int(os.environ.get("SCORING_THRESHOLD", str(DEFAULT_THRESHOLD)))
+
+
+def emit_scoring_telemetry(transaction_id: str, duration_ms: int, outcome: str, score: int) -> None:
+    """Scoring telemetry (W3-08): one structured line per transaction, emitted
+    through logging so it lands in Application Insights (queryable by
+    transaction id — feeds the W3-09 distributed trace). A local JSONL file
+    would be ephemeral and per-worker in the cloud, so logging is the sink."""
+    logging.info(json.dumps({
+        "telemetry": "scoring",
+        "transaction_id": transaction_id,
+        "duration_ms": duration_ms,
+        "outcome": outcome,
+        "score": score,
+        "emitted_at": datetime.now(timezone.utc).isoformat(),
+    }))
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -156,15 +172,26 @@ def score_transaction(payload: dict, history: list[dict]) -> dict:
 def handle_transaction(payload: dict) -> dict:
     """Score a transaction and persist the scored record. Single entry point
     shared by the Service Bus trigger and the by-id helper below."""
+    started_at = datetime.now(timezone.utc)
     account_id = payload.get("account_id")
     history = store.load_account_history(account_id) if account_id else []
     result = score_transaction(payload, history)
+
+    # W3-06: build the readable explanation BEFORE persisting so the Cosmos
+    # record carries it. Safe: a disabled/failed explainer returns None and
+    # the case still opens (closure requirement).
+    if result["case_enqueued"]:
+        result["explanation"] = cases.build_explanation(result)
 
     scored_record = {**payload, **result}
     store.persist_scored_transaction(result["transaction_id"], scored_record)
 
     if result["case_enqueued"]:
         cases.open_case(result, payload)
+
+    duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+    outcome = "case_opened" if result["case_enqueued"] else "scored_only"
+    emit_scoring_telemetry(result["transaction_id"], duration_ms, outcome, result["score"])
     return result
 
 
