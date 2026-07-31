@@ -20,7 +20,10 @@ class ScoringEngineTests(unittest.TestCase):
         os.environ.pop("SCORING_THRESHOLD", None)
 
     def tearDown(self) -> None:
-        self.tempdir.cleanup()
+        try:
+            self.tempdir.cleanup()
+        except OSError:
+            pass
         importlib.reload(function_app)
         global process_transaction_event
         process_transaction_event = function_app.process_transaction_event
@@ -65,6 +68,36 @@ class ScoringEngineTests(unittest.TestCase):
         flagged_cases = Path(self.tempdir.name) / "flagged-cases.jsonl"
         self.assertTrue(flagged_cases.exists())
         self.assertIn(transaction_id, flagged_cases.read_text(encoding="utf-8"))
+
+    def test_scoring_emits_telemetry_for_transaction(self) -> None:
+        payload = {
+            "transaction_id": "tx-telemetry",
+            "account_id": "acct-telemetry",
+            "amount_minor": 1000000,
+            "occurred_at": "2026-01-01T00:00:00Z",
+            "location": {"lat": 0.0, "lon": 0.0},
+            "merchant_id": "risk-merchant",
+            "merchant_category": "travel",
+        }
+
+        # Telemetry is emitted through logging (sink = Application Insights in
+        # the cloud); capture the structured line instead of reading a file.
+        with self.assertLogs(level="INFO") as captured:
+            function_app.handle_transaction(payload)
+
+        telemetry = None
+        for line in captured.output:
+            _, _, message = line.partition(":root:")
+            try:
+                parsed = json.loads(message)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if parsed.get("telemetry") == "scoring" and parsed.get("transaction_id") == "tx-telemetry":
+                telemetry = parsed
+                break
+        self.assertIsNotNone(telemetry)
+        self.assertIn("duration_ms", telemetry)
+        self.assertIn(telemetry["outcome"], {"case_opened", "scored_only"})
 
     def test_detects_rule_details_and_threshold_configuration(self) -> None:
         previous_id = "22222222-3333-4444-5555-666666666666"

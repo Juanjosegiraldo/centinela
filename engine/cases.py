@@ -109,12 +109,100 @@ def _enqueue_flagged_case(body: dict) -> bool:
     return True
 
 
-def _record_local(body: dict) -> None:
+def _local_storage_root() -> Path:
     root_env = os.environ.get("CENTINELA_LOCAL_STORAGE")
-    root = Path(root_env) if root_env else Path(__file__).resolve().parent.parent / "data"
+    return Path(root_env) if root_env else Path(__file__).resolve().parent.parent / "data"
+
+
+def _record_local(body: dict) -> None:
+    root = _local_storage_root()
     root.mkdir(parents=True, exist_ok=True)
     with (root / "flagged-cases.jsonl").open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(body) + "\n")
+
+
+def _rule_observation_text(rule: dict) -> str:
+    observed = rule.get("observed") or {}
+    rule_id = rule.get("id")
+    if rule_id == "velocity":
+        occurred_at = observed.get("occurred_at")
+        previous_occured_at = observed.get("previous_occured_at")
+        window_seconds = observed.get("window_seconds")
+        if occurred_at and previous_occured_at and window_seconds is not None:
+            return (
+                f"the transaction occurred at {occurred_at} and the previous transaction in the {window_seconds}-second "
+                f"window occurred at {previous_occured_at}"
+            )
+        return "the observed time values were recorded"
+
+    if rule_id == "geo_impossible":
+        location = observed.get("location") or {}
+        previous_location = observed.get("previous_location") or {}
+        distance_km = observed.get("distance_km")
+        lat = location.get("lat")
+        lon = location.get("lon")
+        prev_lat = previous_location.get("lat")
+        prev_lon = previous_location.get("lon")
+        if lat is not None and lon is not None and prev_lat is not None and prev_lon is not None and distance_km is not None:
+            return (
+                f"the observed location was {lat}, {lon} and the previous location was {prev_lat}, {prev_lon}, "
+                f"with a distance of {distance_km} km"
+            )
+        return "location observations were recorded"
+
+    if rule_id == "risky_merchant":
+        merchant_id = observed.get("merchant_id")
+        merchant_category = observed.get("merchant_category")
+        if merchant_id and merchant_category:
+            return f"the merchant id was {merchant_id} and the merchant category was {merchant_category}"
+        if merchant_id:
+            return f"the merchant id was {merchant_id}"
+        if merchant_category:
+            return f"the merchant category was {merchant_category}"
+        return "merchant observations were recorded"
+
+    if rule_id == "atypical_amount":
+        amount_minor = observed.get("amount_minor")
+        if amount_minor is not None:
+            return f"the observed amount was {amount_minor}"
+        return "the observed amount was recorded"
+
+    return "the observed values were recorded"
+
+
+def generate_case_explanation(result: dict) -> str:
+    """Create a deterministic, template-based explanation for a flagged case."""
+    transaction_id = str(result.get("transaction_id", "unknown"))
+    rules = result.get("rules_triggered") or []
+    clauses = []
+    for rule in rules:
+        rule_id = rule.get("id")
+        observation_text = _rule_observation_text(rule)
+        clauses.append(f"Rule {rule_id} fired because {observation_text}.")
+
+    if clauses:
+        body = " ".join(clauses)
+        return f"Case {transaction_id} was opened because the score reached the threshold. Rules fired: {body}"
+    return f"Case {transaction_id} was opened because the score reached the threshold."
+
+
+def _explainer_enabled() -> bool:
+    return os.environ.get("CENTINELA_ENABLE_CASE_EXPLAINER", "true").lower() != "false"
+
+
+def build_explanation(result: dict) -> "str | None":
+    """Safe explainer entry point (W3-06). Deterministic template, no threads:
+    generation happens after scoring, guarded so that a disabled or failing
+    explainer NEVER prevents the case from opening (the closure requirement).
+    The kill-switch is an app setting (CENTINELA_ENABLE_CASE_EXPLAINER=false),
+    so the 'explainer stopped' failure scenario is demoable without redeploy."""
+    if not _explainer_enabled():
+        return None
+    try:
+        return generate_case_explanation(result)
+    except Exception:  # a broken explanation must not block the case
+        logging.exception("explainer failed for %s", result.get("transaction_id"))
+        return None
 
 
 def open_case(result: dict, payload: dict) -> None:
@@ -127,6 +215,10 @@ def open_case(result: dict, payload: dict) -> None:
         "transaction_id": result["transaction_id"],
         "account_id": payload.get("account_id"),
         "score": result["score"],
+        # W3-06: the readable explanation travels with the case (also persisted
+        # in the Cosmos scored record by the engine). None when the explainer
+        # is disabled/failed — the case opens regardless.
+        "explanation": result.get("explanation"),
     }
 
     wrote_sql = _open_case_sql(case["transaction_id"], case["account_id"], case["score"])

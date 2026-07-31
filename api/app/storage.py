@@ -291,6 +291,51 @@ def load_account_history(account_id: str) -> list[dict]:
     return history
 
 
+# Document state (W3-07): one JSON blob per document attempt under
+# case-state/{case_id}/. Blob-backed so the state survives restarts and is
+# shared across workers (a local file would be ephemeral and per-instance in
+# the cloud); local fallback keeps tests hermetic.
+def _case_state_prefix(case_id: str) -> str:
+    return f"case-state/{case_id}/"
+
+
+def append_case_document_state(case_id: str, document_name: str, status: str, outcome: str, notification: str, metadata: dict | None = None) -> None:
+    record = {
+        "case_id": case_id,
+        "document_name": document_name,
+        "status": status,
+        "outcome": outcome,
+        "notification": notification,
+        "metadata": metadata or {},
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    blob_name = f"{_case_state_prefix(case_id)}{document_name}.json"
+    if _blobs() is not None:
+        _blobs().get_blob_client(DOCS_CONTAINER, blob_name).upload_blob(
+            json.dumps(record), overwrite=True,
+            content_settings=ContentSettings(content_type="application/json"),
+        )
+        return
+    path = _local_path(blob_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+
+
+def list_case_documents(case_id: str) -> list[dict]:
+    if _blobs() is not None:
+        container = _blobs().get_container_client(DOCS_CONTAINER)
+        rows = []
+        for blob in container.list_blobs(name_starts_with=_case_state_prefix(case_id)):
+            data = container.get_blob_client(blob.name).download_blob().readall()
+            rows.append(json.loads(data))
+        return sorted(rows, key=lambda r: r.get("updated_at", ""))
+    root = _local_path(_case_state_prefix(case_id))
+    if not root.exists():
+        return []
+    rows = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(root.glob("*.json"))]
+    return sorted(rows, key=lambda r: r.get("updated_at", ""))
+
+
 def store_document(target_name: str, data: bytes, content_type: str) -> str:
     if _blobs() is not None:
         _blobs().get_blob_client(DOCS_CONTAINER, target_name).upload_blob(
