@@ -18,8 +18,8 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install API dependencies (tests import fastapi/pydantic)
-        run: pip install -r api/requirements.txt
+      - name: Install API dependencies (+ httpx, test-only dep of TestClient)
+        run: pip install -r api/requirements.txt httpx
       - name: Run unit suite
         run: python -m unittest discover -s tests -v
 
