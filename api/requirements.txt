@@ -4,5 +4,8 @@ gunicorn==22.*
 pydantic==2.*
 python-multipart==0.0.9
 azure-identity==1.*
+azure-servicebus==7.*
 azure-storage-blob==12.*
 azure-storage-queue==12.*
+azure-cosmos==4.16.3
+azure-ai-documentintelligence==1.*

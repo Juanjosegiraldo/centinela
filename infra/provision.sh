@@ -14,7 +14,7 @@ set -euo pipefail
 PROJECT="ctn"                       # project short code (Centinela)
 ENVIRONMENT="dev"                   # dev | qa | prd
 LOCATION="centralus"                   # region justified in docs/region.md
-UNIQUE_SUFFIX="jj15"                # 3-6 chars: resolves global uniqueness (storage/webapp)
+UNIQUE_SUFFIX="jj16"                # 3-6 chars: resolves global uniqueness (storage/webapp)
 
 RG="rg-${PROJECT}-${ENVIRONMENT}"
 VNET="vnet-${PROJECT}-${ENVIRONMENT}"
@@ -101,6 +101,7 @@ az storage account create -g "$RG" -n "$STG" -l "$LOCATION" \
   --sku Standard_LRS --kind StorageV2 \
   --min-tls-version TLS1_2 \
   --allow-blob-public-access false \
+  --allow-shared-key-access false \
   --default-action Allow -o none   # locked down at the end, after creating containers/queue
 
 # Containers and queue (Entra login, never account keys)
@@ -176,23 +177,50 @@ assign() {
 echo ">> Waiting for the managed identity to propagate..."
 sleep 20
 
-# SERVICE role (web app managed identity) — data plane only:
-#   Blob Data Contributor  -> operation: persist raw transaction; store verification document
-#   Queue Data Contributor -> operation: enqueue transaction for the scoring engine (Week 2)
+# Role matrix (Deliverable 8 / minimum privilege)
+# Control plane = manage Azure resources (resource group, app service, VNet, storage account, RBAC).
+# Data plane = read/write data inside Azure storage resources.
+#
+# Service (web app managed identity)
+#   - Storage Blob Data Contributor on the storage account:
+#       required to persist raw transactions and verification documents (write blobs).
+#   - Storage Queue Data Contributor on the storage account:
+#       required to enqueue incoming transactions for downstream processing (write queue messages).
+#
+# Analyst
+#   - Reader on the resource group:
+#       required to inspect infrastructure state and resource metadata.
+#   - Storage Blob Data Reader on the storage account:
+#       required to read verification evidence blobs for analysis.
+#
+# Auditor
+#   - Reader on the resource group:
+#       required to inspect deployed resources without changing them.
+#   - Storage Blob Data Reader on the storage account:
+#       required to read verification evidence blobs for audit review.
+#
+# Admin
+#   - Contributor on the resource group:
+#       required to manage the deployment lifecycle (create/update/delete resources and app settings).
+#
+# Built-in roles reviewed before assignment: Reader (control plane read-only),
+# Contributor (control plane administration), Storage Blob Data Reader/Contributor,
+# and Storage Queue Data Contributor. Each choice maps to a concrete system operation.
 assign "$APP_MI" ServicePrincipal "Storage Blob Data Contributor"  "$STG_ID"
 assign "$APP_MI" ServicePrincipal "Storage Queue Data Contributor" "$STG_ID"
 
 # Human roles (only if object IDs were provided)
-[ -n "$AUDITOR_OID" ] && assign "$AUDITOR_OID" User "Reader" "$RG_ID"                     # control plane: see everything, change nothing
-[ -n "$ANALYST_OID" ] && assign "$ANALYST_OID" User "Reader" "$RG_ID"                     # sees resources, cannot modify them
-[ -n "$ANALYST_OID" ] && assign "$ANALYST_OID" User "Storage Blob Data Reader" "$STG_ID"  # data plane: read case evidence
+[ -n "$AUDITOR_OID" ] && assign "$AUDITOR_OID" User "Reader" "$RG_ID"                     # control plane: inspect resources without changing them
+[ -n "$AUDITOR_OID" ] && assign "$AUDITOR_OID" User "Storage Blob Data Reader" "$STG_ID"  # data plane: read verification evidence for audit review
+[ -n "$ANALYST_OID" ] && assign "$ANALYST_OID" User "Reader" "$RG_ID"                     # control plane: inspect infrastructure state
+[ -n "$ANALYST_OID" ] && assign "$ANALYST_OID" User "Storage Blob Data Reader" "$STG_ID"  # data plane: read verification evidence for analysis
 [ -n "$ADMIN_OID" ]   && assign "$ADMIN_OID"   User "Contributor" "$RG_ID"
 
 # ----------------------------- LOCK DOWN THE DATA LAYER ----------------------
 echo ">> Isolating the storage account (deny by default + subnet rule)"
 az storage account network-rule add -g "$RG" --account-name "$STG" \
   --vnet-name "$VNET" --subnet "$SNET_APP" -o none || true
-az storage account update -g "$RG" -n "$STG" --default-action Deny --bypass None -o none
+az storage account update -g "$RG" -n "$STG" --default-action Deny --bypass None --allow-shared-key-access false -o none
 
 # ----------------------------- OUTPUT ----------------------------------------
 echo ""
@@ -202,6 +230,7 @@ echo "  Resource group : $RG ($LOCATION)"
 echo "  VNet           : $VNET  app=$SNET_APP_CIDR data=$SNET_DATA_CIDR"
 echo "  Storage        : $STG (access: $SNET_APP only, deny by default)"
 echo "  Containers     : $TX_CONTAINER, $DOCS_CONTAINER | Queue: $INGEST_QUEUE"
+echo "  Shared Key     : disabled; evidence docs require user-delegation SAS"
 echo "  Web App        : https://${WEBAPP}.azurewebsites.net (plan $PLAN_SKU)"
 echo "  Managed identity: $APP_MI"
 echo "  Next step      : deploy the API ->"
